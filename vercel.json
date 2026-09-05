@@ -1,0 +1,7 @@
+{
+    "github": {
+        "silent": true
+    },
+    "buildCommand": "mkdir public; mv lrc-editor.html public/index.html",
+    "outputDirectory": "public"
+}

@@ -1,0 +1,1658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Timecode — LRC Lyrics Editor</title>
+<style>
+  :root{
+    --bg:#12151c;
+    --panel:#181c25;
+    --panel-raised:#1f2430;
+    --line:#2a303d;
+    --text:#e8eaf0;
+    --text-dim:#8b93a7;
+    --text-faint:#5b6478;
+    --amber:#e8a33d;
+    --amber-dim:#7a5a26;
+    --teal:#4fa8a0;
+    --teal-dim:#2a4d49;
+    --warn:#d97757;
+    --danger:#d9534f;
+    --focus:#7fb8ff;
+    --radius:6px;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ height:100%; }
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    font-size:15px;
+    line-height:1.5;
+    display:flex;
+    flex-direction:column;
+    min-height:100vh;
+  }
+  button{
+    font-family:inherit;
+    font-size:inherit;
+    color:inherit;
+    background:none;
+    border:none;
+    cursor:pointer;
+  }
+  button:disabled{ cursor:not-allowed; opacity:.4; }
+  input[type="text"]{
+    font-family:inherit;
+    font-size:inherit;
+    color:var(--text);
+    background:var(--panel-raised);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:6px 8px;
+  }
+  :focus-visible{ outline:2px solid var(--focus); outline-offset:2px; }
+  kbd{
+    font-family:var(--mono);
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:4px;
+    padding:2px 7px;
+    font-size:12px;
+    color:var(--amber);
+  }
+
+  /* ---------- Header ---------- */
+  header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:16px;
+    padding:14px 20px;
+    border-bottom:1px solid var(--line);
+    background:var(--panel);
+    flex-shrink:0;
+    flex-wrap:wrap;
+  }
+  .brand{
+    display:flex;
+    align-items:baseline;
+    gap:10px;
+    min-width:0;
+  }
+  .brand-mark{
+    font-family:var(--mono);
+    font-size:13px;
+    letter-spacing:.02em;
+    color:var(--amber);
+    border:1px solid var(--amber-dim);
+    border-radius:4px;
+    padding:2px 6px;
+    flex-shrink:0;
+  }
+  .brand-name{
+    font-size:16px;
+    font-weight:600;
+    flex-shrink:0;
+  }
+  .file-name{
+    font-family:var(--mono);
+    font-size:13px;
+    color:var(--text-dim);
+    overflow-wrap:anywhere;
+  }
+  .header-actions{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    flex-shrink:0;
+    flex-wrap:wrap;
+    justify-content:flex-end;
+  }
+  .header-actions .divider{
+    width:1px;
+    height:20px;
+    background:var(--line);
+    margin:0 2px;
+  }
+  .btn{
+    padding:8px 14px;
+    border-radius:var(--radius);
+    border:1px solid var(--line);
+    background:var(--panel-raised);
+    font-weight:500;
+    white-space:nowrap;
+  }
+  .btn:hover:not(:disabled){ border-color:var(--text-faint); }
+  .btn-sm{ padding:6px 10px; font-size:13px; }
+  .btn-primary{
+    background:var(--amber);
+    color:#20160a;
+    border-color:var(--amber);
+    font-weight:600;
+  }
+  .btn-primary:hover:not(:disabled){ filter:brightness(1.08); }
+  .btn-quiet{
+    border-color:transparent;
+    background:none;
+    color:var(--text-dim);
+  }
+  .btn-quiet:hover:not(:disabled){ color:var(--text); }
+  .btn-danger-text{ color:var(--danger); }
+
+  /* ---------- Upload screen ---------- */
+  #upload-screen{
+    flex:1;
+    display:flex;
+    align-items:flex-start;
+    justify-content:center;
+    padding:40px 20px;
+    overflow-y:auto;
+  }
+  .upload-card{
+    width:100%;
+    max-width:480px;
+    text-align:center;
+    margin-top:20px;
+  }
+  .upload-glyph{
+    font-family:var(--mono);
+    font-size:13px;
+    color:var(--amber);
+    border:1px solid var(--amber-dim);
+    border-radius:4px;
+    display:inline-block;
+    padding:3px 8px;
+    margin-bottom:18px;
+  }
+  .upload-card h1{
+    font-size:22px;
+    font-weight:600;
+    margin:0 0 8px;
+  }
+  .upload-card p{
+    color:var(--text-dim);
+    margin:0 0 28px;
+    font-size:14px;
+  }
+  .dropzone{
+    border:1.5px dashed var(--line);
+    border-radius:10px;
+    padding:36px 20px;
+    cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  .dropzone:hover, .dropzone.drag-over{
+    border-color:var(--amber);
+    background:rgba(232,163,61,0.06);
+  }
+  .dropzone-label{
+    font-size:14px;
+    color:var(--text-dim);
+  }
+  .dropzone-label strong{ color:var(--text); }
+
+  /* ---------- Resume banner ---------- */
+  #resume-banner{
+    display:none;
+    width:100%;
+    margin-top:20px;
+    padding:14px 16px;
+    background:var(--panel-raised);
+    border:1px solid var(--teal-dim);
+    border-radius:var(--radius);
+    text-align:left;
+  }
+  #resume-banner .rb-title{
+    font-weight:600;
+    font-size:14px;
+    margin-bottom:2px;
+  }
+  #resume-banner .rb-sub{
+    color:var(--text-dim);
+    font-size:13px;
+    margin-bottom:12px;
+  }
+  #resume-banner .rb-actions{
+    display:flex;
+    gap:8px;
+  }
+
+  /* ---------- Help panel (shown alongside upload) ---------- */
+  .help-panel{
+    margin-top:28px;
+    text-align:left;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:18px 20px;
+  }
+  .help-panel h2{
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.06em;
+    color:var(--text-faint);
+    margin:0 0 12px;
+  }
+  .help-panel h2:not(:first-child){ margin-top:18px; }
+  .help-panel ol, .help-panel ul{
+    margin:0;
+    padding-left:18px;
+    font-size:13.5px;
+    color:var(--text-dim);
+  }
+  .help-panel li{ margin-bottom:6px; }
+  .help-panel li:last-child{ margin-bottom:0; }
+  .help-panel strong{ color:var(--text); }
+
+  /* ---------- Editor screen ---------- */
+  #editor-screen{
+    flex:1;
+    display:none;
+    flex-direction:column;
+    min-height:0;
+  }
+  #line-list-wrap{
+    flex:1;
+    overflow-y:auto;
+    padding:8px 0 24px;
+  }
+  #line-list{
+    max-width:780px;
+    margin:0 auto;
+    padding:0 20px;
+  }
+  .lrc-line{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    padding:9px 10px;
+    border-radius:var(--radius);
+    border-left:2px solid transparent;
+    cursor:pointer;
+  }
+  .lrc-line:hover{ background:var(--panel); }
+  .lrc-line.selected{
+    background:var(--teal-dim);
+    border-left-color:var(--teal);
+  }
+  .lrc-line.out-of-order{
+    border-left-color:var(--warn);
+  }
+  .lrc-line.now-playing{
+    box-shadow: inset 0 0 0 1px var(--amber-dim);
+    background: rgba(232,163,61,0.07);
+  }
+  .lrc-line.now-playing .time{
+    font-weight:700;
+  }
+  .lrc-line.now-playing.selected{
+    background: linear-gradient(rgba(232,163,61,0.10), rgba(232,163,61,0.10)), var(--teal-dim);
+  }
+  .lrc-line .time{
+    font-family:var(--mono);
+    font-size:13px;
+    color:var(--amber);
+    flex-shrink:0;
+    width:78px;
+  }
+  .lrc-line .time.unset{
+    color:var(--text-faint);
+  }
+  .lrc-line .play-btn{
+    flex-shrink:0;
+    width:22px;
+    height:22px;
+    border-radius:4px;
+    color:var(--amber);
+    font-size:11px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+  .lrc-line .play-btn:hover{ background:var(--panel-raised); }
+  .lrc-line .nudge{
+    display:flex;
+    gap:2px;
+    flex-shrink:0;
+  }
+  .lrc-line .nudge button{
+    width:20px;
+    height:20px;
+    border-radius:4px;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--text-dim);
+  }
+  .lrc-line .nudge button:hover{ background:var(--panel-raised); color:var(--text); }
+  .lrc-line .text{
+    flex:1;
+    min-width:0;
+    white-space:normal;
+    overflow-wrap:anywhere;
+  }
+  .lrc-line .text.empty{
+    color:var(--text-faint);
+    font-style:italic;
+  }
+  .lrc-line .text-input{
+    flex:1;
+    min-width:0;
+    width:100%;
+  }
+  .lrc-line .edit-btn{
+    flex-shrink:0;
+    font-size:12px;
+    color:var(--text-faint);
+    padding:4px 6px;
+    border-radius:4px;
+  }
+  .lrc-line .edit-btn:hover{ color:var(--text); background:var(--panel-raised); }
+  .lrc-line .warn-icon{
+    flex-shrink:0;
+    font-size:12px;
+    color:var(--warn);
+  }
+  .empty-list-hint{
+    text-align:center;
+    color:var(--text-faint);
+    padding:40px 20px;
+    font-size:14px;
+  }
+
+  /* ---------- Player bar ---------- */
+  #player-bar{
+    flex-shrink:0;
+    border-top:1px solid var(--line);
+    background:var(--panel);
+    padding:12px 20px 16px;
+  }
+  #seek-row{
+    max-width:780px;
+    margin:0 auto 12px;
+    display:flex;
+    align-items:center;
+    gap:12px;
+  }
+  #seek-time{
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--text-dim);
+    width:64px;
+  }
+  #seek-time.duration{ text-align:right; }
+  #seek-bar{
+    flex:1;
+    -webkit-appearance:none;
+    appearance:none;
+    height:4px;
+    border-radius:2px;
+    background:var(--line);
+    outline:none;
+  }
+  #seek-bar::-webkit-slider-thumb{
+    -webkit-appearance:none;
+    appearance:none;
+    width:14px;
+    height:14px;
+    border-radius:50%;
+    background:var(--amber);
+    cursor:pointer;
+    margin-top:0;
+  }
+  #seek-bar::-moz-range-thumb{
+    width:14px;
+    height:14px;
+    border:none;
+    border-radius:50%;
+    background:var(--amber);
+    cursor:pointer;
+  }
+  #transport-row{
+    max-width:780px;
+    margin:0 auto;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .transport-btn{
+    padding:8px 12px;
+    border-radius:var(--radius);
+    background:var(--panel-raised);
+    border:1px solid var(--line);
+    font-family:var(--mono);
+    font-size:13px;
+  }
+  .transport-btn:hover:not(:disabled){ border-color:var(--text-faint); }
+  .transport-btn.toggle-on{
+    background:var(--amber);
+    color:#20160a;
+    border-color:var(--amber);
+    font-weight:700;
+  }
+  .transport-btn.toggle-on:hover:not(:disabled){ filter:brightness(1.08); }
+  #play-pause{
+    width:44px;
+    background:var(--amber);
+    color:#20160a;
+    border-color:var(--amber);
+    font-family:var(--sans);
+    font-weight:700;
+  }
+  #play-pause:hover:not(:disabled){ filter:brightness(1.08); }
+  .transport-spacer{ width:1px; height:22px; background:var(--line); margin:0 4px; }
+
+  /* ---------- Modal ---------- */
+  .modal-overlay{
+    display:none;
+    position:fixed;
+    inset:0;
+    background:rgba(8,10,14,0.6);
+    align-items:center;
+    justify-content:center;
+    z-index:50;
+  }
+  .modal-overlay.open{ display:flex; }
+  .modal{
+    background:var(--panel-raised);
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:22px;
+    width:90%;
+    max-width:380px;
+  }
+  .modal.modal-wide{ max-width:460px; }
+  .modal h2{
+    font-size:16px;
+    margin:0 0 8px;
+  }
+  .modal p{
+    font-size:14px;
+    color:var(--text-dim);
+    margin:0 0 20px;
+  }
+  .modal-actions{
+    display:flex;
+    justify-content:flex-end;
+    gap:8px;
+    margin-top:20px;
+  }
+  .shortcuts-list{
+    display:grid;
+    grid-template-columns:auto 1fr;
+    gap:10px 16px;
+    font-size:13.5px;
+    color:var(--text-dim);
+    align-items:center;
+  }
+  .shortcuts-list .keys{ white-space:nowrap; }
+
+  #toast{
+    position:fixed;
+    bottom:24px;
+    left:50%;
+    transform:translateX(-50%) translateY(0);
+    background:var(--panel-raised);
+    border:1px solid var(--line);
+    color:var(--text);
+    padding:10px 16px;
+    border-radius:var(--radius);
+    font-size:13px;
+    opacity:0;
+    pointer-events:none;
+    transition:opacity .2s, transform .2s;
+    z-index:60;
+  }
+  #toast.show{
+    opacity:1;
+    transform:translateX(-50%) translateY(-8px);
+  }
+
+  @media (max-width:700px){
+    #transport-row{ gap:6px; }
+    .transport-btn{ padding:7px 9px; font-size:12px; }
+    .header-actions .btn{ padding:6px 10px; font-size:13px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="brand-mark">LRC</span>
+    <span class="brand-name">Timecode</span>
+    <span class="file-name" id="header-filename"></span>
+  </div>
+  <div class="header-actions">
+    <button class="btn btn-quiet btn-sm" id="shortcuts-btn">⌨ Shortcuts</button>
+    <div class="divider" id="file-actions-divider" style="display:none;"></div>
+    <div class="header-actions" id="file-actions" style="display:none; padding:0;">
+      <button class="btn btn-sm" id="download-lrc-btn">Download .lrc</button>
+      <button class="btn btn-primary btn-sm" id="embed-download-btn">Embed &amp; download .mp3</button>
+      <button class="btn btn-quiet btn-sm btn-danger-text" id="new-song-btn">New song</button>
+    </div>
+  </div>
+</header>
+
+<div id="upload-screen">
+  <div class="upload-card">
+    <span class="upload-glyph">00:00.00</span>
+    <h1>Sync lyrics to a song</h1>
+    <p>Upload an MP3. Existing synced or plain lyrics will be loaded automatically if the file has them.</p>
+    <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload MP3 file">
+      <div class="dropzone-label"><strong>Click to choose</strong> or drop an MP3 file here</div>
+    </div>
+    <input type="file" id="file-input" accept="audio/mpeg,.mp3" style="display:none;">
+    <div id="resume-banner">
+      <div class="rb-title">Resume previous session?</div>
+      <div class="rb-sub" id="resume-sub"></div>
+      <div class="rb-actions">
+        <button class="btn btn-primary" id="resume-reattach-btn">Choose file to reattach</button>
+        <button class="btn btn-quiet" id="resume-discard-btn">Discard</button>
+      </div>
+    </div>
+
+    <div class="help-panel">
+      <h2>How it works</h2>
+      <ol>
+        <li>Upload an MP3. If it already has synced or plain lyrics embedded, they're loaded as your starting point.</li>
+        <li>Each lyric line shows a timestamp. Click a line to <strong>select</strong> it (this doesn't move playback) — select it, then play the song and hit <kbd>Enter</kbd> (or the "Set time for line" button) right when it should start.</li>
+        <li>Use each line's ▶ button to preview playback from that exact line.</li>
+        <li>Nudge a line's timing with the −/+ buttons or <kbd>←</kbd>/<kbd>→</kbd> once it's selected.</li>
+        <li>Use "Insert pause line" to mark instrumental breaks at the current playback position.</li>
+        <li>When you're done, download the plain <strong>.lrc</strong> file, or embed the synced lyrics directly into the MP3 and download that.</li>
+      </ol>
+      <h2>Along the way</h2>
+      <ul>
+        <li>Your lyrics and timestamps auto-save in this browser as you work, so an accidental tab close won't lose your progress — you'll just need to re-select the same MP3 file to reattach the audio.</li>
+        <li>See the <strong>Shortcuts</strong> button (top right) for the full list of keyboard controls.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div id="editor-screen">
+  <div id="line-list-wrap">
+    <div id="line-list"></div>
+  </div>
+
+  <div id="player-bar">
+    <div id="seek-row">
+      <span class="time" id="seek-time">00:00</span>
+      <input type="range" id="seek-bar" min="0" max="1000" value="0" step="1">
+      <span class="time duration" id="seek-duration">00:00</span>
+    </div>
+    <div id="transport-row">
+      <button class="transport-btn" id="back5">−5s</button>
+      <button class="transport-btn" id="back1">−1s</button>
+      <button class="transport-btn" id="play-pause">▶</button>
+      <button class="transport-btn" id="fwd1">+1s</button>
+      <button class="transport-btn" id="fwd5">+5s</button>
+      <span class="transport-spacer"></span>
+      <button class="transport-btn" id="set-time-btn">Set time for line</button>
+      <button class="transport-btn" id="insert-pause-btn">Insert pause line</button>
+      <span class="transport-spacer"></span>
+      <button class="transport-btn" id="tick-toggle-btn" aria-pressed="false" title="Play a short tick sound at the start of each line during playback">Tick sound: Off</button>
+    </div>
+  </div>
+</div>
+
+<audio id="audio-el" preload="metadata"></audio>
+
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal">
+    <h2 id="confirm-title">Discard unsaved changes?</h2>
+    <p id="confirm-body">You've made edits since your last export. Starting a new song will discard them.</p>
+    <div class="modal-actions">
+      <button class="btn btn-quiet" id="confirm-cancel-btn">Cancel</button>
+      <button class="btn" style="background:var(--danger); border-color:var(--danger); color:#fff;" id="confirm-ok-btn">Discard &amp; continue</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="shortcuts-modal">
+  <div class="modal modal-wide">
+    <h2>Keyboard shortcuts</h2>
+    <p style="margin-bottom:14px;">Active whenever a song is loaded and you're not editing a line's text.</p>
+    <div class="shortcuts-list">
+      <span class="keys"><kbd>↑</kbd> <kbd>↓</kbd></span><span>Select the previous / next line</span>
+      <span class="keys"><kbd>←</kbd> <kbd>→</kbd></span><span>Nudge the selected line's time by −0.1s / +0.1s</span>
+      <span class="keys"><kbd>Space</kbd></span><span>Play from the selected line (or toggle play/pause if none selected)</span>
+      <span class="keys"><kbd>Enter</kbd></span><span>Set the selected line's time to the current playback position</span>
+      <span class="keys"><kbd>Backspace</kbd></span><span>Clear the selected line's time</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="shortcuts-close-btn">Got it</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+
+/* =========================================================================
+   ID3v2 read/write core
+   ========================================================================= */
+
+function readSyncsafe(bytes, offset) {
+  return ((bytes[offset] & 0x7f) << 21) | ((bytes[offset + 1] & 0x7f) << 14) |
+         ((bytes[offset + 2] & 0x7f) << 7) | (bytes[offset + 3] & 0x7f);
+}
+function writeSyncsafe(view, offset, value) {
+  view.setUint8(offset, (value >>> 21) & 0x7f);
+  view.setUint8(offset + 1, (value >>> 14) & 0x7f);
+  view.setUint8(offset + 2, (value >>> 7) & 0x7f);
+  view.setUint8(offset + 3, value & 0x7f);
+}
+function readUInt32BE(bytes, offset) {
+  return (bytes[offset] << 24 | bytes[offset + 1] << 16 | bytes[offset + 2] << 8 | bytes[offset + 3]) >>> 0;
+}
+
+function parseID3(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  if (bytes.length < 10 || bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) {
+    return { present: false, audioStart: 0, frames: [], version: 3 };
+  }
+  const majorVersion = bytes[3];
+  const flags = bytes[5];
+  const size = readSyncsafe(bytes, 6);
+  const headerLen = 10;
+  let footerLen = (flags & 0x10) ? 10 : 0;
+  const audioStart = headerLen + size + footerLen;
+
+  let framesStart = headerLen;
+  if (flags & 0x40) {
+    if (majorVersion >= 4) {
+      const extSize = readSyncsafe(bytes, framesStart);
+      framesStart += extSize;
+    } else {
+      const extSize = readUInt32BE(bytes, framesStart);
+      framesStart += 4 + extSize;
+    }
+  }
+
+  let frameBytes = bytes;
+  const framesRegionEnd = headerLen + size;
+  if ((flags & 0x80) && majorVersion < 4) {
+    const region = bytes.slice(framesStart, framesRegionEnd);
+    const cleaned = [];
+    for (let i = 0; i < region.length; i++) {
+      cleaned.push(region[i]);
+      if (region[i] === 0xff && region[i + 1] === 0x00) i++;
+    }
+    frameBytes = new Uint8Array(cleaned);
+    framesStart = 0;
+  }
+
+  const wasDeunsynced = (flags & 0x80) && majorVersion < 4;
+  const frames = [];
+  let pos = framesStart;
+  const framesEnd = wasDeunsynced ? frameBytes.length : framesRegionEnd;
+  const bytesForFrames = frameBytes;
+  while (pos + 10 <= framesEnd) {
+    const id = String.fromCharCode(bytesForFrames[pos], bytesForFrames[pos + 1], bytesForFrames[pos + 2], bytesForFrames[pos + 3]);
+    if (id === '\0\0\0\0') break;
+    let frameSize;
+    if (majorVersion >= 4) {
+      frameSize = readSyncsafe(bytesForFrames, pos + 4);
+    } else {
+      frameSize = readUInt32BE(bytesForFrames, pos + 4);
+    }
+    const frameFlags = (bytesForFrames[pos + 8] << 8) | bytesForFrames[pos + 9];
+    const dataStart = pos + 10;
+    if (frameSize < 0 || dataStart + frameSize > framesEnd) break;
+    const data = bytesForFrames.slice(dataStart, dataStart + frameSize);
+    frames.push({ id, data, flags: frameFlags });
+    pos = dataStart + frameSize;
+  }
+
+  return { present: true, version: majorVersion, headerLen, tagSize: size, audioStart, frames };
+}
+
+function decodeText(bytes, encodingByte) {
+  let text;
+  if (encodingByte === 0) {
+    text = new TextDecoder('iso-8859-1').decode(bytes);
+  } else if (encodingByte === 1) {
+    if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+      text = new TextDecoder('utf-16le').decode(bytes.slice(2));
+    } else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+      text = new TextDecoder('utf-16be').decode(bytes.slice(2));
+    } else {
+      text = new TextDecoder('utf-16le').decode(bytes);
+    }
+  } else if (encodingByte === 2) {
+    text = new TextDecoder('utf-16be').decode(bytes);
+  } else {
+    text = new TextDecoder('utf-8').decode(bytes);
+  }
+  return text.replace(/\u0000+$/, '');
+}
+
+function splitDescriptorAndText(bytes, encodingByte) {
+  const wide = (encodingByte === 1 || encodingByte === 2);
+  let i = 0;
+  if (wide) {
+    let start = 0;
+    if (bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) {
+      start = 2;
+    }
+    i = start;
+    while (i + 1 < bytes.length && !(bytes[i] === 0 && bytes[i + 1] === 0)) i += 2;
+    const descriptor = decodeText(bytes.slice(0, i), encodingByte);
+    const textBytes = bytes.slice(Math.min(i + 2, bytes.length));
+    return { descriptor, textBytes };
+  } else {
+    while (i < bytes.length && bytes[i] !== 0) i++;
+    const descriptor = decodeText(bytes.slice(0, i), encodingByte);
+    const textBytes = bytes.slice(Math.min(i + 1, bytes.length));
+    return { descriptor, textBytes };
+  }
+}
+
+function parseUSLT(data) {
+  const encodingByte = data[0];
+  const language = String.fromCharCode(data[1], data[2], data[3]);
+  const rest = data.slice(4);
+  const { descriptor, textBytes } = splitDescriptorAndText(rest, encodingByte);
+  const text = decodeText(textBytes, encodingByte);
+  return { language, descriptor, text };
+}
+
+function parseSYLT(data) {
+  const encodingByte = data[0];
+  const language = String.fromCharCode(data[1], data[2], data[3]);
+  const timestampFormat = data[4];
+  const contentType = data[5];
+  let rest = data.slice(6);
+  const split = splitDescriptorAndText(rest, encodingByte);
+  rest = split.textBytes;
+
+  const lines = [];
+  const wide = (encodingByte === 1 || encodingByte === 2);
+  while (rest.length > 0) {
+    let i = 0;
+    let textPart, afterText;
+    if (wide) {
+      let start = 0;
+      if (rest.length >= 2 && ((rest[0] === 0xff && rest[1] === 0xfe) || (rest[0] === 0xfe && rest[1] === 0xff))) start = 2;
+      i = start;
+      while (i + 1 < rest.length && !(rest[i] === 0 && rest[i + 1] === 0)) i += 2;
+      if (i + 1 >= rest.length) break;
+      textPart = rest.slice(0, i);
+      afterText = rest.slice(i + 2);
+    } else {
+      while (i < rest.length && rest[i] !== 0) i++;
+      if (i >= rest.length) break;
+      textPart = rest.slice(0, i);
+      afterText = rest.slice(i + 1);
+    }
+    if (afterText.length < 4) break;
+    const timeMs = readUInt32BE(afterText, 0);
+    const text = decodeText(textPart, encodingByte);
+    lines.push({ timeMs, text });
+    rest = afterText.slice(4);
+  }
+  return { language, timestampFormat, contentType, descriptor, lines };
+}
+
+function encodeUTF16LEWithBOM(str) {
+  const codeUnits = [0xff, 0xfe];
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    codeUnits.push(code & 0xff, (code >> 8) & 0xff);
+  }
+  return new Uint8Array(codeUnits);
+}
+
+function buildUSLTFrame(text, language) {
+  language = language || 'und';
+  const encodingByte = 1;
+  const descriptorBytes = new Uint8Array([0, 0]);
+  const textBytes = encodeUTF16LEWithBOM(text);
+  const lang = new TextEncoder().encode(language.padEnd(3, 'n').slice(0, 3));
+
+  const payloadLen = 1 + 3 + descriptorBytes.length + textBytes.length;
+  const payload = new Uint8Array(payloadLen);
+  let o = 0;
+  payload[o++] = encodingByte;
+  payload.set(lang, o); o += 3;
+  payload.set(descriptorBytes, o); o += descriptorBytes.length;
+  payload.set(textBytes, o); o += textBytes.length;
+
+  const frame = new Uint8Array(10 + payload.length);
+  frame[0] = 0x55; frame[1] = 0x53; frame[2] = 0x4c; frame[3] = 0x54;
+  const dv = new DataView(frame.buffer);
+  dv.setUint32(4, payload.length, false);
+  frame[8] = 0; frame[9] = 0;
+  frame.set(payload, 10);
+  return frame;
+}
+
+function embedLyrics(arrayBuffer, lrcText, language) {
+  const parsed = parseID3(arrayBuffer);
+  const originalBytes = new Uint8Array(arrayBuffer);
+  const audioBytes = originalBytes.slice(parsed.audioStart);
+
+  const keptFrames = parsed.frames.filter(f => f.id !== 'USLT' && f.id !== 'SYLT');
+  const newUslt = buildUSLTFrame(lrcText, language);
+
+  const frameBuffers = keptFrames.map(f => {
+    const buf = new Uint8Array(10 + f.data.length);
+    buf[0] = f.id.charCodeAt(0); buf[1] = f.id.charCodeAt(1); buf[2] = f.id.charCodeAt(2); buf[3] = f.id.charCodeAt(3);
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(4, f.data.length, false);
+    buf[8] = 0; buf[9] = 0;
+    buf.set(f.data, 10);
+    return buf;
+  });
+  frameBuffers.push(newUslt);
+
+  const totalFramesLen = frameBuffers.reduce((s, b) => s + b.length, 0);
+  const header = new Uint8Array(10);
+  header[0] = 0x49; header[1] = 0x44; header[2] = 0x33;
+  header[3] = 3; header[4] = 0;
+  header[5] = 0;
+  const headerDv = new DataView(header.buffer);
+  writeSyncsafe(headerDv, 6, totalFramesLen);
+
+  const out = new Uint8Array(header.length + totalFramesLen + audioBytes.length);
+  let o = 0;
+  out.set(header, o); o += header.length;
+  for (const fb of frameBuffers) { out.set(fb, o); o += fb.length; }
+  out.set(audioBytes, o);
+  return out.buffer;
+}
+
+</script>
+<script>
+/* =========================================================================
+   App state & helpers
+   ========================================================================= */
+const state = {
+  fileName: null,
+  fileBuffer: null,      // ArrayBuffer of the currently loaded mp3 (used for re-embedding)
+  audioUrl: null,        // object URL for <audio>
+  durationMs: 0,
+  lines: [],             // [{ id, timeMs (number|null), text }]
+  selectedLineId: null,  // manually selected line: target for keyboard shortcuts / set-time / nudge
+  playingLineId: null,   // auto-tracked during playback: the line whose time we're currently past
+  editingLineId: null,
+  dirty: false,          // changed since last export
+  seekDragging: false,
+  tickEnabled: false,    // play a short tick sound at the start of each line during playback
+};
+
+let nextLineId = 1;
+function makeLine(timeMs, text) {
+  return { id: nextLineId++, timeMs, text };
+}
+
+function formatTime(ms) {
+  if (ms === null || ms === undefined) return '--:--.--';
+  if (!isFinite(ms) || ms < 0) ms = 0;
+  const totalCentis = Math.round(ms / 10);
+  const mins = Math.floor(totalCentis / 6000);
+  const secs = Math.floor((totalCentis % 6000) / 100);
+  const centis = totalCentis % 100;
+  return String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0') + '.' + String(centis).padStart(2, '0');
+}
+
+
+const LRC_TAG_RE = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+
+function parseLrcText(text) {
+  const lines = [];
+  const rawLines = text.split(/\r\n|\r|\n/);
+  for (const raw of rawLines) {
+    LRC_TAG_RE.lastIndex = 0;
+    const tags = [];
+    let m;
+    while ((m = LRC_TAG_RE.exec(raw)) !== null) {
+      const mins = parseInt(m[1], 10);
+      const secs = parseInt(m[2], 10);
+      let frac = m[3] || '0';
+      frac = frac.length === 1 ? frac + '00' : (frac.length === 2 ? frac + '0' : frac.slice(0, 3));
+      const ms = mins * 60000 + secs * 1000 + parseInt(frac, 10);
+      tags.push(ms);
+    }
+    if (tags.length === 0) continue;
+    const content = raw.replace(LRC_TAG_RE, '').trim();
+    for (const ms of tags) lines.push(makeLine(ms, content));
+  }
+  return lines;
+}
+
+function looksLikeLrc(text) {
+  LRC_TAG_RE.lastIndex = 0;
+  return LRC_TAG_RE.test(text);
+}
+
+function plainTextToLines(text) {
+  return text.split(/\r\n|\r|\n/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+    .map(s => makeLine(null, s));
+}
+
+// For export, lines with no timestamp yet get a dummy value: the timestamp of the
+// nearest preceding line that does have one (or 0 if nothing precedes it). This keeps
+// every line in the file so nothing gets silently dropped, and re-importing the file
+// later won't reorder anything since duplicate/equal timestamps preserve file order.
+function resolveExportTimestamps(lines) {
+  let last = 0;
+  return lines.map(l => {
+    const t = (l.timeMs === null || l.timeMs === undefined) ? last : l.timeMs;
+    last = t;
+    return { timeMs: t, text: l.text };
+  });
+}
+
+function serializeLines(lines) {
+  return resolveExportTimestamps(lines)
+    .map(l => '[' + formatTime(l.timeMs) + ']' + l.text)
+    .join('\n');
+}
+
+function baseName(fileName) {
+  return fileName.replace(/\.[^/.]+$/, '');
+}
+
+/* =========================================================================
+   MP3 validation — check magic bytes, not just the file extension
+   ========================================================================= */
+function looksLikeMp3(bytes) {
+  if (bytes.length >= 3 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return true; // "ID3"
+  const scanLen = Math.min(bytes.length, 8192);
+  for (let i = 0; i < scanLen - 1; i++) {
+    if (bytes[i] === 0xff && (bytes[i + 1] & 0xe0) === 0xe0) return true; // MPEG frame sync
+  }
+  return false;
+}
+
+/* =========================================================================
+   Persistence — plain localStorage. This runs as a standalone page (opened
+   via file:// or any static server), not inside Claude's artifact sandbox,
+   so the browser's own localStorage is what's actually available here.
+   ========================================================================= */
+const SESSION_KEY = 'lrc-timecode-session';
+let saveTimer = null;
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveSessionNow, 700);
+}
+
+function saveSessionNow() {
+  if (!state.fileName) return;
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      fileName: state.fileName,
+      durationMs: state.durationMs,
+      lines: state.lines.map(l => ({ timeMs: l.timeMs, text: l.text })),
+      dirty: state.dirty,
+      savedAt: Date.now(),
+    }));
+  } catch (e) {
+    console.error('Session save failed', e);
+  }
+}
+
+function clearSession() {
+  clearTimeout(saveTimer);
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
+}
+
+function checkForResumableSession() {
+  let data;
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return;
+    data = JSON.parse(raw);
+  } catch (e) {
+    return;
+  }
+  if (!data || !data.fileName || !Array.isArray(data.lines)) return;
+  document.getElementById('resume-sub').textContent =
+    '"' + data.fileName + '" — ' + data.lines.length + ' line' + (data.lines.length === 1 ? '' : 's') +
+    (data.dirty ? ', unsaved changes' : '');
+  document.getElementById('resume-banner').style.display = 'block';
+}
+
+/* =========================================================================
+   DOM refs
+   ========================================================================= */
+const el = {
+  dropzone: document.getElementById('dropzone'),
+  fileInput: document.getElementById('file-input'),
+  headerFilename: document.getElementById('header-filename'),
+  fileActions: document.getElementById('file-actions'),
+  fileActionsDivider: document.getElementById('file-actions-divider'),
+  newSongBtn: document.getElementById('new-song-btn'),
+  shortcutsBtn: document.getElementById('shortcuts-btn'),
+  shortcutsModal: document.getElementById('shortcuts-modal'),
+  shortcutsCloseBtn: document.getElementById('shortcuts-close-btn'),
+  lineList: document.getElementById('line-list'),
+  audio: document.getElementById('audio-el'),
+  seekBar: document.getElementById('seek-bar'),
+  seekTime: document.getElementById('seek-time'),
+  seekDuration: document.getElementById('seek-duration'),
+  playPause: document.getElementById('play-pause'),
+  back5: document.getElementById('back5'),
+  back1: document.getElementById('back1'),
+  fwd1: document.getElementById('fwd1'),
+  fwd5: document.getElementById('fwd5'),
+  setTimeBtn: document.getElementById('set-time-btn'),
+  insertPauseBtn: document.getElementById('insert-pause-btn'),
+  tickToggleBtn: document.getElementById('tick-toggle-btn'),
+  downloadLrcBtn: document.getElementById('download-lrc-btn'),
+  embedDownloadBtn: document.getElementById('embed-download-btn'),
+  resumeBanner: document.getElementById('resume-banner'),
+  resumeReattachBtn: document.getElementById('resume-reattach-btn'),
+  resumeDiscardBtn: document.getElementById('resume-discard-btn'),
+  confirmModal: document.getElementById('confirm-modal'),
+  confirmCancelBtn: document.getElementById('confirm-cancel-btn'),
+  confirmOkBtn: document.getElementById('confirm-ok-btn'),
+  toast: document.getElementById('toast'),
+};
+
+let pendingResumeData = null; // set when a resume banner is showing and user clicks "choose file to reattach"
+
+/* =========================================================================
+   Toast
+   ========================================================================= */
+let toastTimer = null;
+function showToast(msg) {
+  el.toast.textContent = msg;
+  el.toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.toast.classList.remove('show'), 2600);
+}
+
+/* =========================================================================
+   Rendering
+   ========================================================================= */
+function renderLineList() {
+  el.lineList.innerHTML = '';
+  if (state.lines.length === 0) {
+    const hint = document.createElement('div');
+    hint.className = 'empty-list-hint';
+    hint.textContent = 'No lyric lines yet. Use "Insert pause line" while playing to add the first one.';
+    el.lineList.appendChild(hint);
+    return;
+  }
+  state.lines.forEach((line, idx) => {
+    const row = document.createElement('div');
+    row.className = 'lrc-line';
+    row.dataset.id = line.id;
+    if (line.id === state.selectedLineId) row.classList.add('selected');
+    if (line.id === state.playingLineId) row.classList.add('now-playing');
+    const prev = idx > 0 ? state.lines[idx - 1] : null;
+    const outOfOrder = !!(prev && prev.timeMs !== null && line.timeMs !== null && prev.timeMs > line.timeMs);
+    if (outOfOrder) row.classList.add('out-of-order');
+
+    const time = document.createElement('span');
+    time.className = 'time' + (line.timeMs === null ? ' unset' : '');
+    time.textContent = formatTime(line.timeMs);
+    row.appendChild(time);
+
+    const playBtn = document.createElement('button');
+    playBtn.className = 'play-btn';
+    playBtn.textContent = '▶';
+    playBtn.title = line.timeMs === null ? 'No time set yet' : 'Play from this line';
+    playBtn.disabled = line.timeMs === null;
+    playBtn.addEventListener('click', (e) => { e.stopPropagation(); playFromLine(line.id); });
+    row.appendChild(playBtn);
+
+    const nudge = document.createElement('span');
+    nudge.className = 'nudge';
+    const minus = document.createElement('button');
+    minus.textContent = '−';
+    minus.title = 'Nudge back 0.1s';
+    minus.addEventListener('click', (e) => { e.stopPropagation(); state.selectedLineId = line.id; nudgeLine(line.id, -100); });
+    const plus = document.createElement('button');
+    plus.textContent = '+';
+    plus.title = 'Nudge forward 0.1s';
+    plus.addEventListener('click', (e) => { e.stopPropagation(); state.selectedLineId = line.id; nudgeLine(line.id, 100); });
+    nudge.appendChild(minus);
+    nudge.appendChild(plus);
+    row.appendChild(nudge);
+
+    if (line.id === state.editingLineId) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'text-input';
+      input.value = line.text;
+      row.appendChild(input);
+      setTimeout(() => { input.focus(); input.select(); }, 0);
+      const commit = () => {
+        line.text = input.value;
+        state.editingLineId = null;
+        markDirty();
+        renderLineList();
+      };
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { e.preventDefault(); state.editingLineId = null; renderLineList(); }
+        e.stopPropagation(); // never let per-line editing leak into global shortcuts
+      });
+      input.addEventListener('blur', commit);
+      input.addEventListener('click', (e) => e.stopPropagation());
+    } else {
+      const text = document.createElement('span');
+      text.className = 'text' + (line.text.trim() === '' ? ' empty' : '');
+      text.textContent = line.text.trim() === '' ? '(pause)' : line.text;
+      row.appendChild(text);
+
+      const editBtn = document.createElement('button');
+      editBtn.className = 'edit-btn';
+      editBtn.textContent = 'Edit';
+      editBtn.addEventListener('click', (e) => { e.stopPropagation(); state.editingLineId = line.id; renderLineList(); });
+      row.appendChild(editBtn);
+    }
+
+    if (outOfOrder) {
+      const warnIcon = document.createElement('span');
+      warnIcon.className = 'warn-icon';
+      warnIcon.textContent = '⚠';
+      warnIcon.title = 'Out of chronological order relative to the line above';
+      row.appendChild(warnIcon);
+    }
+
+    // Clicking a row SELECTS it only — it no longer moves playback. This keeps
+    // "select a line, then hit Enter/Set-time when it should start" reliable.
+    row.addEventListener('click', () => selectLine(line.id));
+    row.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      state.editingLineId = line.id;
+      renderLineList();
+    });
+
+    el.lineList.appendChild(row);
+  });
+}
+
+function markDirty() {
+  state.dirty = true;
+  scheduleSave();
+}
+
+function selectLine(lineId, opts) {
+  opts = opts || {};
+  state.selectedLineId = lineId;
+  renderLineList();
+  if (opts.scroll !== false) {
+    const rowEl = el.lineList.querySelector('.lrc-line.selected');
+    if (rowEl && typeof rowEl.scrollIntoView === 'function') rowEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function moveSelection(delta) {
+  if (state.lines.length === 0) return;
+  const idx = state.lines.findIndex(l => l.id === state.selectedLineId);
+  let newIdx;
+  if (idx === -1) newIdx = delta > 0 ? 0 : state.lines.length - 1;
+  else newIdx = Math.min(Math.max(idx + delta, 0), state.lines.length - 1);
+  selectLine(state.lines[newIdx].id);
+}
+
+function nudgeLine(lineId, deltaMs) {
+  const line = state.lines.find(l => l.id === lineId);
+  if (!line) return;
+  const base = line.timeMs === null ? 0 : line.timeMs;
+  line.timeMs = Math.max(0, base + deltaMs);
+  markDirty();
+  renderLineList();
+}
+
+function nudgeSelected(deltaMs) {
+  if (state.selectedLineId == null) { showToast('Select a line first'); return; }
+  nudgeLine(state.selectedLineId, deltaMs);
+}
+
+function setTimeForSelected() {
+  if (state.selectedLineId == null) { showToast('Select a line first'); return; }
+  const line = state.lines.find(l => l.id === state.selectedLineId);
+  if (!line) return;
+  line.timeMs = Math.round(el.audio.currentTime * 1000);
+  markDirty();
+  renderLineList();
+}
+
+function clearTimeForSelected() {
+  if (state.selectedLineId == null) { showToast('Select a line first'); return; }
+  const line = state.lines.find(l => l.id === state.selectedLineId);
+  if (!line) return;
+  line.timeMs = null;
+  markDirty();
+  renderLineList();
+}
+
+function playFromLine(lineId) {
+  const line = state.lines.find(l => l.id === lineId);
+  if (!line) return;
+  if (line.timeMs === null) { showToast('This line has no time set yet'); return; }
+  selectLine(lineId);
+  el.audio.currentTime = line.timeMs / 1000;
+  el.audio.play();
+}
+
+function playSelectedOrToggle() {
+  if (state.selectedLineId != null) {
+    const line = state.lines.find(l => l.id === state.selectedLineId);
+    if (line && line.timeMs !== null) { playFromLine(state.selectedLineId); return; }
+  }
+  togglePlayPause();
+}
+
+/* =========================================================================
+   Player
+   ========================================================================= */
+function updateSeekUi() {
+  if (state.seekDragging) return;
+  const dur = el.audio.duration || 0;
+  const cur = el.audio.currentTime || 0;
+  el.seekBar.max = String(Math.max(1, Math.round(dur * 1000)));
+  el.seekBar.value = String(Math.round(cur * 1000));
+  el.seekTime.textContent = formatTime(cur * 1000);
+  el.seekDuration.textContent = formatTime(dur * 1000);
+}
+
+// Tracks which line we're currently "inside" during playback, purely as a visual aid
+// (separate from state.selectedLineId, which is manual and drives keyboard shortcuts).
+function updateNowPlayingLine() {
+  if (state.lines.length === 0) {
+    if (state.playingLineId !== null) { state.playingLineId = null; renderLineList(); }
+    return;
+  }
+  const curMs = el.audio.currentTime * 1000;
+  let best = null;
+  for (const line of state.lines) {
+    if (line.timeMs !== null && line.timeMs <= curMs) {
+      if (!best || line.timeMs > best.timeMs) best = line;
+    }
+  }
+  const newPlayingId = best ? best.id : null;
+  if (newPlayingId !== state.playingLineId) {
+    state.playingLineId = newPlayingId;
+    renderLineList();
+    const rowEl = el.lineList.querySelector('.lrc-line.now-playing');
+    if (rowEl && typeof rowEl.scrollIntoView === 'function') {
+      rowEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
+}
+
+function seekBy(deltaSeconds) {
+  const dur = el.audio.duration || Infinity;
+  el.audio.currentTime = Math.min(Math.max(0, el.audio.currentTime + deltaSeconds), dur);
+}
+
+function togglePlayPause() {
+  if (el.audio.paused) el.audio.play(); else el.audio.pause();
+}
+
+/* ---- Tick sound: a short synthesized click played at the start of each line ---- */
+let audioCtx = null;
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) audioCtx = new Ctx();
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+function playTick() {
+  const ctx = ensureAudioCtx();
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'square';
+  osc.frequency.value = 1800;
+  const t0 = ctx.currentTime;
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.002);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.05);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + 0.06);
+}
+
+let lastTickCheckTime = null; // audio.currentTime (seconds) as of the last tick scan
+function checkTicks() {
+  if (!state.tickEnabled || el.audio.paused) return;
+  const cur = el.audio.currentTime;
+  if (lastTickCheckTime === null) { lastTickCheckTime = cur; return; }
+  if (cur <= lastTickCheckTime) { lastTickCheckTime = cur; return; } // seek/loop, don't burst-fire
+  const crossed = state.lines
+    .filter(l => l.timeMs !== null && l.timeMs / 1000 > lastTickCheckTime && l.timeMs / 1000 <= cur)
+    .sort((a, b) => a.timeMs - b.timeMs);
+  for (const _line of crossed) playTick();
+  lastTickCheckTime = cur;
+}
+
+el.audio.addEventListener('play', () => { el.playPause.textContent = '❚❚'; lastTickCheckTime = el.audio.currentTime; });
+el.audio.addEventListener('pause', () => { el.playPause.textContent = '▶'; });
+el.audio.addEventListener('seeking', () => { lastTickCheckTime = el.audio.currentTime; });
+el.audio.addEventListener('loadedmetadata', () => {
+  state.durationMs = (el.audio.duration || 0) * 1000;
+  updateSeekUi();
+});
+el.audio.addEventListener('timeupdate', () => {
+  updateSeekUi();
+  updateNowPlayingLine();
+  checkTicks();
+});
+
+el.seekBar.addEventListener('input', () => {
+  state.seekDragging = true;
+  const ms = Number(el.seekBar.value);
+  el.seekTime.textContent = formatTime(ms);
+});
+el.seekBar.addEventListener('change', () => {
+  const ms = Number(el.seekBar.value);
+  el.audio.currentTime = ms / 1000;
+  state.seekDragging = false;
+});
+
+el.playPause.addEventListener('click', togglePlayPause);
+el.back5.addEventListener('click', () => seekBy(-5));
+el.back1.addEventListener('click', () => seekBy(-1));
+el.fwd1.addEventListener('click', () => seekBy(1));
+el.fwd5.addEventListener('click', () => seekBy(5));
+el.setTimeBtn.addEventListener('click', setTimeForSelected);
+el.insertPauseBtn.addEventListener('click', () => {
+  const timeMs = Math.round(el.audio.currentTime * 1000);
+  const newLine = makeLine(timeMs, '');
+  let insertAt = state.lines.length;
+  const selIdx = state.lines.findIndex(l => l.id === state.selectedLineId);
+  if (selIdx !== -1) insertAt = selIdx + 1;
+  state.lines.splice(insertAt, 0, newLine);
+  markDirty();
+  selectLine(newLine.id);
+});
+
+/* =========================================================================
+   Keyboard shortcuts (only while a song is loaded and not editing text)
+   ========================================================================= */
+document.addEventListener('keydown', (e) => {
+  if (state.editingLineId != null) return;
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if (document.getElementById('editor-screen').style.display === 'none') return;
+
+  switch (e.key) {
+    case 'ArrowUp': e.preventDefault(); moveSelection(-1); break;
+    case 'ArrowDown': e.preventDefault(); moveSelection(1); break;
+    case 'ArrowLeft': e.preventDefault(); nudgeSelected(-100); break;
+    case 'ArrowRight': e.preventDefault(); nudgeSelected(100); break;
+    case ' ': case 'Spacebar': e.preventDefault(); playSelectedOrToggle(); break;
+    case 'Enter': e.preventDefault(); setTimeForSelected(); break;
+    case 'Backspace': e.preventDefault(); clearTimeForSelected(); break;
+    default: break;
+  }
+});
+
+/* =========================================================================
+   Shortcuts modal
+   ========================================================================= */
+el.shortcutsBtn.addEventListener('click', () => el.shortcutsModal.classList.add('open'));
+el.shortcutsCloseBtn.addEventListener('click', () => el.shortcutsModal.classList.remove('open'));
+el.shortcutsModal.addEventListener('click', (e) => { if (e.target === el.shortcutsModal) el.shortcutsModal.classList.remove('open'); });
+
+/* =========================================================================
+   Tick-sound toggle
+   ========================================================================= */
+const TICK_PREF_KEY = 'lrc-timecode-tick-enabled';
+function applyTickButtonUi() {
+  el.tickToggleBtn.textContent = 'Tick sound: ' + (state.tickEnabled ? 'On' : 'Off');
+  el.tickToggleBtn.setAttribute('aria-pressed', String(state.tickEnabled));
+  el.tickToggleBtn.classList.toggle('toggle-on', state.tickEnabled);
+}
+try {
+  state.tickEnabled = localStorage.getItem(TICK_PREF_KEY) === '1';
+} catch (e) { /* default off */ }
+applyTickButtonUi();
+
+el.tickToggleBtn.addEventListener('click', () => {
+  state.tickEnabled = !state.tickEnabled;
+  if (state.tickEnabled) ensureAudioCtx(); // unlock audio output right on this user gesture
+  applyTickButtonUi();
+  try { localStorage.setItem(TICK_PREF_KEY, state.tickEnabled ? '1' : '0'); } catch (e) { /* ignore */ }
+});
+
+
+/* =========================================================================
+   File loading & lyric extraction
+   ========================================================================= */
+function extractInitialLines(parsed) {
+  const syltFrame = parsed.frames.find(f => f.id === 'SYLT');
+  if (syltFrame) {
+    try {
+      const sylt = parseSYLT(syltFrame.data);
+      if (sylt.timestampFormat === 2 && sylt.lines.length > 0) {
+        return sylt.lines.map(l => makeLine(l.timeMs, l.text));
+      }
+    } catch (e) { console.warn('SYLT parse failed', e); }
+  }
+  const usltFrame = parsed.frames.find(f => f.id === 'USLT');
+  if (usltFrame) {
+    try {
+      const uslt = parseUSLT(usltFrame.data);
+      if (uslt.text && uslt.text.trim()) {
+        if (looksLikeLrc(uslt.text)) return parseLrcText(uslt.text);
+        return plainTextToLines(uslt.text);
+      }
+    } catch (e) { console.warn('USLT parse failed', e); }
+  }
+  return [];
+}
+
+async function loadMp3File(file, opts) {
+  opts = opts || {};
+
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  if (!looksLikeMp3(bytes)) {
+    showToast('That doesn\'t look like a valid MP3 file — no MP3 header found.');
+    return;
+  }
+
+  const parsed = parseID3(buffer);
+
+  state.fileName = file.name;
+  state.fileBuffer = buffer;
+  state.dirty = false;
+
+  if (opts.restoredLines) {
+    state.lines = opts.restoredLines.map(l => makeLine(l.timeMs, l.text));
+    state.dirty = !!opts.restoredDirty;
+  } else {
+    state.lines = extractInitialLines(parsed);
+  }
+  state.selectedLineId = state.lines.length ? state.lines[0].id : null;
+  state.playingLineId = null;
+  state.editingLineId = null;
+  lastTickCheckTime = null;
+
+  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+  state.audioUrl = URL.createObjectURL(file);
+  el.audio.src = state.audioUrl;
+
+  el.headerFilename.textContent = file.name;
+  el.fileActions.style.display = 'flex';
+  el.fileActionsDivider.style.display = 'block';
+  document.getElementById('upload-screen').style.display = 'none';
+  document.getElementById('editor-screen').style.display = 'flex';
+  el.resumeBanner.style.display = 'none';
+
+  renderLineList();
+  scheduleSave();
+
+  const sourceNote = opts.restoredLines
+    ? 'Session restored'
+    : (state.lines.length ? 'Loaded existing lyrics from the file' : 'No existing lyrics found — starting blank');
+  showToast(sourceNote);
+}
+
+function handleFileChosen(file) {
+  if (!file) return;
+  if (pendingResumeData) {
+    const expectedName = pendingResumeData.fileName;
+    if (file.name !== expectedName) {
+      const proceed = window.confirm(
+        'This file is named "' + file.name + '" but the saved session was for "' + expectedName + '".\n\nReattach anyway?'
+      );
+      if (!proceed) return;
+    }
+    const restored = pendingResumeData;
+    pendingResumeData = null;
+    loadMp3File(file, { restoredLines: restored.lines, restoredDirty: restored.dirty });
+  } else {
+    loadMp3File(file);
+  }
+}
+
+el.dropzone.addEventListener('click', () => el.fileInput.click());
+el.dropzone.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.fileInput.click(); }
+});
+el.fileInput.addEventListener('change', (e) => {
+  handleFileChosen(e.target.files[0]);
+  e.target.value = '';
+});
+el.dropzone.addEventListener('dragover', (e) => { e.preventDefault(); el.dropzone.classList.add('drag-over'); });
+el.dropzone.addEventListener('dragleave', () => el.dropzone.classList.remove('drag-over'));
+el.dropzone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  el.dropzone.classList.remove('drag-over');
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  handleFileChosen(file);
+});
+
+el.resumeReattachBtn.addEventListener('click', () => {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (raw) {
+      pendingResumeData = JSON.parse(raw);
+      el.fileInput.click();
+    }
+  } catch (e) {
+    showToast('Could not load saved session');
+  }
+});
+el.resumeDiscardBtn.addEventListener('click', () => {
+  clearSession();
+  el.resumeBanner.style.display = 'none';
+});
+
+/* =========================================================================
+   Exports
+   ========================================================================= */
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+el.downloadLrcBtn.addEventListener('click', () => {
+  const dummyCount = state.lines.filter(l => l.timeMs === null).length;
+  const text = serializeLines(state.lines);
+  const blob = new Blob([text], { type: 'text/plain' });
+  downloadBlob(blob, baseName(state.fileName) + '.lrc');
+  state.dirty = false;
+  scheduleSave();
+  showToast(dummyCount > 0
+    ? 'Downloaded .lrc (' + dummyCount + ' untimed line' + (dummyCount === 1 ? '' : 's') + ' used a placeholder time)'
+    : 'Downloaded .lrc file');
+});
+
+el.embedDownloadBtn.addEventListener('click', () => {
+  if (!state.fileBuffer) return;
+  try {
+    const dummyCount = state.lines.filter(l => l.timeMs === null).length;
+    const lrcText = serializeLines(state.lines);
+    const newBuffer = embedLyrics(state.fileBuffer, lrcText, 'und');
+    const blob = new Blob([newBuffer], { type: 'audio/mpeg' });
+    downloadBlob(blob, baseName(state.fileName) + '-lrc.mp3');
+    state.dirty = false;
+    scheduleSave();
+    showToast(dummyCount > 0
+      ? 'Downloaded MP3 (' + dummyCount + ' untimed line' + (dummyCount === 1 ? '' : 's') + ' used a placeholder time)'
+      : 'Downloaded MP3 with embedded lyrics');
+  } catch (e) {
+    console.error(e);
+    showToast('Embedding failed — see console for details');
+  }
+});
+
+
+/* =========================================================================
+   New song / reset
+   ========================================================================= */
+function openConfirmModal() { el.confirmModal.classList.add('open'); }
+function closeConfirmModal() { el.confirmModal.classList.remove('open'); }
+
+function resetToUpload() {
+  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+  el.audio.pause();
+  el.audio.src = '';
+  state.fileName = null;
+  state.fileBuffer = null;
+  state.audioUrl = null;
+  state.durationMs = 0;
+  state.lines = [];
+  state.selectedLineId = null;
+  state.playingLineId = null;
+  state.editingLineId = null;
+  state.dirty = false;
+  lastTickCheckTime = null;
+
+  el.headerFilename.textContent = '';
+  el.fileActions.style.display = 'none';
+  el.fileActionsDivider.style.display = 'none';
+  document.getElementById('editor-screen').style.display = 'none';
+  document.getElementById('upload-screen').style.display = 'flex';
+}
+
+el.newSongBtn.addEventListener('click', () => {
+  if (state.dirty) {
+    openConfirmModal();
+  } else {
+    clearSession();
+    resetToUpload();
+    checkForResumableSession();
+  }
+});
+
+el.confirmCancelBtn.addEventListener('click', closeConfirmModal);
+el.confirmOkBtn.addEventListener('click', () => {
+  closeConfirmModal();
+  clearSession();
+  resetToUpload();
+  checkForResumableSession();
+});
+el.confirmModal.addEventListener('click', (e) => {
+  if (e.target === el.confirmModal) closeConfirmModal();
+});
+
+/* =========================================================================
+   Init
+   ========================================================================= */
+checkForResumableSession();
+
+</script>
+</body>
+</html>
