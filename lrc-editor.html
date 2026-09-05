@@ -206,6 +206,11 @@
     border:1px solid var(--teal-dim);
     border-radius:var(--radius);
     text-align:left;
+    transition:border-color .15s, background .15s;
+  }
+  #resume-banner.drag-over{
+    border-color:var(--amber);
+    background:rgba(232,163,61,0.06);
   }
   #resume-banner .rb-title{
     font-weight:600;
@@ -303,6 +308,13 @@
   .lrc-line .time.unset{
     color:var(--text-faint);
   }
+  .lrc-line .time-input{
+    font-family:var(--mono);
+    font-size:13px;
+    flex-shrink:0;
+    width:82px;
+    padding:2px 4px;
+  }
   .lrc-line .play-btn{
     flex-shrink:0;
     width:22px;
@@ -352,6 +364,7 @@
     border-radius:4px;
   }
   .lrc-line .edit-btn:hover{ color:var(--text); background:var(--panel-raised); }
+  .lrc-line .delete-btn:hover{ background:rgba(217,83,79,0.15); }
   .lrc-line .warn-icon{
     flex-shrink:0;
     font-size:12px;
@@ -429,6 +442,10 @@
     font-family:var(--mono);
     font-size:13px;
   }
+  select.transport-btn{
+    color:var(--text);
+    cursor:pointer;
+  }
   .transport-btn:hover:not(:disabled){ border-color:var(--text-faint); }
   .transport-btn.toggle-on{
     background:var(--amber);
@@ -468,6 +485,24 @@
     max-width:380px;
   }
   .modal.modal-wide{ max-width:460px; }
+  .modal:has(#lyrics-textarea){ max-width:640px; width:94%; }
+  #lyrics-textarea{
+    width:100%;
+    height:min(50vh, 420px);
+    font-family:var(--mono);
+    font-size:13px;
+    color:var(--text);
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:10px;
+    resize:vertical;
+  }
+  #lyrics-modal code{
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--amber);
+  }
   .modal h2{
     font-size:16px;
     margin:0 0 8px;
@@ -492,6 +527,48 @@
     align-items:center;
   }
   .shortcuts-list .keys{ white-space:nowrap; }
+
+  .settings-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:14px;
+    margin-bottom:14px;
+    font-size:13.5px;
+    color:var(--text-dim);
+  }
+  .settings-row input[type="number"]{
+    font-family:var(--mono);
+    font-size:13px;
+    color:var(--text);
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:4px;
+    padding:4px 6px;
+  }
+  .settings-row input[type="checkbox"]{ width:16px; height:16px; flex-shrink:0; }
+  #keymap-list{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    max-height:240px;
+    overflow-y:auto;
+    margin-bottom:6px;
+  }
+  .keymap-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:14px;
+    font-size:13.5px;
+    color:var(--text-dim);
+  }
+  .keymap-row .key-btn{
+    font-family:var(--mono);
+    min-width:78px;
+    text-align:center;
+    flex-shrink:0;
+  }
 
   #toast{
     position:fixed;
@@ -530,9 +607,11 @@
     <span class="file-name" id="header-filename"></span>
   </div>
   <div class="header-actions">
+    <button class="btn btn-quiet btn-sm" id="settings-btn">⚙ Settings</button>
     <button class="btn btn-quiet btn-sm" id="shortcuts-btn">⌨ Shortcuts</button>
     <div class="divider" id="file-actions-divider" style="display:none;"></div>
     <div class="header-actions" id="file-actions" style="display:none; padding:0;">
+      <button class="btn btn-sm" id="import-lyrics-btn">Import/edit lyrics text</button>
       <button class="btn btn-sm" id="download-lrc-btn">Download .lrc</button>
       <button class="btn btn-primary btn-sm" id="embed-download-btn">Embed &amp; download .mp3</button>
       <button class="btn btn-quiet btn-sm btn-danger-text" id="new-song-btn">New song</button>
@@ -553,7 +632,7 @@
       <div class="rb-title">Resume previous session?</div>
       <div class="rb-sub" id="resume-sub"></div>
       <div class="rb-actions">
-        <button class="btn btn-primary" id="resume-reattach-btn">Choose file to reattach</button>
+        <button class="btn btn-primary" id="resume-reattach-btn">Choose or drop file to reattach</button>
         <button class="btn btn-quiet" id="resume-discard-btn">Discard</button>
       </div>
     </div>
@@ -598,7 +677,13 @@
       <button class="transport-btn" id="set-time-btn">Set time for line</button>
       <button class="transport-btn" id="insert-pause-btn">Insert pause line</button>
       <span class="transport-spacer"></span>
-      <button class="transport-btn" id="tick-toggle-btn" aria-pressed="false" title="Play a short tick sound at the start of each line during playback">Tick sound: Off</button>
+      <select class="transport-btn" id="speed-select" title="Playback speed">
+        <option value="1">Speed: 100%</option>
+        <option value="0.9">Speed: 90%</option>
+        <option value="0.75">Speed: 75%</option>
+        <option value="0.5">Speed: 50%</option>
+        <option value="0.25">Speed: 25%</option>
+      </select>
     </div>
   </div>
 </div>
@@ -619,16 +704,56 @@
 <div class="modal-overlay" id="shortcuts-modal">
   <div class="modal modal-wide">
     <h2>Keyboard shortcuts</h2>
-    <p style="margin-bottom:14px;">Active whenever a song is loaded and you're not editing a line's text.</p>
-    <div class="shortcuts-list">
-      <span class="keys"><kbd>↑</kbd> <kbd>↓</kbd></span><span>Select the previous / next line</span>
-      <span class="keys"><kbd>←</kbd> <kbd>→</kbd></span><span>Nudge the selected line's time by −0.1s / +0.1s</span>
-      <span class="keys"><kbd>Space</kbd></span><span>Play from the selected line (or toggle play/pause if none selected)</span>
-      <span class="keys"><kbd>Enter</kbd></span><span>Set the selected line's time to the current playback position</span>
-      <span class="keys"><kbd>Backspace</kbd></span><span>Clear the selected line's time</span>
-    </div>
+    <p style="margin-bottom:14px;">Active whenever a song is loaded and you're not editing a line's text. Change these in Settings.</p>
+    <div class="shortcuts-list" id="shortcuts-list"></div>
     <div class="modal-actions">
       <button class="btn btn-primary" id="shortcuts-close-btn">Got it</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal modal-wide">
+    <h2>Settings</h2>
+    <div class="settings-row">
+      <span>Tick sound while playing</span>
+      <button class="btn btn-sm transport-btn" id="settings-tick-toggle" aria-pressed="false">Off</button>
+    </div>
+    <div class="settings-row">
+      <span>Tick volume</span>
+      <span style="display:flex; align-items:center; gap:8px;">
+        <input type="range" id="settings-tick-volume" min="0" max="1" step="0.05" style="width:120px;">
+        <span id="settings-tick-volume-label" style="font-family:var(--mono); font-size:12px; width:36px; text-align:right;">60%</span>
+      </span>
+    </div>
+    <div class="settings-row">
+      <span>Nudge amount (← / → and per-line −/+)</span>
+      <span><input type="number" id="settings-nudge" min="0.01" max="5" step="0.01" style="width:70px;"> s</span>
+    </div>
+    <label class="settings-row" style="cursor:pointer;">
+      <span>Jump to next line automatically after setting a line's time (Enter)</span>
+      <input type="checkbox" id="settings-autoadvance">
+    </label>
+
+    <h2 style="margin-top:20px;">Key bindings</h2>
+    <p style="margin-bottom:10px;">Click a key, then press the new key you want. Press Escape to cancel.</p>
+    <div id="keymap-list"></div>
+
+    <div class="modal-actions">
+      <button class="btn btn-quiet" id="settings-reset-btn">Reset to defaults</button>
+      <button class="btn btn-primary" id="settings-close-btn">Done</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="lyrics-modal">
+  <div class="modal modal-wide">
+    <h2>Import / edit lyrics</h2>
+    <p style="margin-bottom:10px;">Paste plain lyrics (one line each) or LRC-style timed lyrics (e.g. <code>[00:12.34]line here</code>). This replaces the current line list. Existing lyrics are pre-filled below so you can edit them directly.</p>
+    <textarea id="lyrics-textarea" spellcheck="false"></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-quiet" id="lyrics-cancel-btn">Cancel</button>
+      <button class="btn btn-primary" id="lyrics-apply-btn">Apply</button>
     </div>
   </div>
 </div>
@@ -885,9 +1010,11 @@ const state = {
   selectedLineId: null,  // manually selected line: target for keyboard shortcuts / set-time / nudge
   playingLineId: null,   // auto-tracked during playback: the line whose time we're currently past
   editingLineId: null,
+  editingTimeLineId: null,
   dirty: false,          // changed since last export
   seekDragging: false,
   tickEnabled: false,    // play a short tick sound at the start of each line during playback
+  tickVolume: 0.6,       // 0-1
 };
 
 let nextLineId = 1;
@@ -903,6 +1030,22 @@ function formatTime(ms) {
   const secs = Math.floor((totalCentis % 6000) / 100);
   const centis = totalCentis % 100;
   return String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0') + '.' + String(centis).padStart(2, '0');
+}
+
+// Parses a hand-typed timestamp like "01:23.45", "1:23", or "01:23:45" back into ms.
+// Returns null if it doesn't look like a timestamp at all (an empty/blank input clears the time).
+function parseTimeInput(str) {
+  const trimmed = str.trim();
+  if (trimmed === '') return { ok: true, ms: null };
+  const m = trimmed.match(/^(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?$/);
+  if (!m) return { ok: false };
+  const mins = parseInt(m[1], 10);
+  const secs = parseInt(m[2], 10);
+  if (secs > 59) return { ok: false };
+  let frac = m[3] || '0';
+  frac = frac.length === 1 ? frac + '00' : (frac.length === 2 ? frac + '0' : frac.slice(0, 3));
+  const ms = mins * 60000 + secs * 1000 + parseInt(frac, 10);
+  return { ok: true, ms };
 }
 
 
@@ -1039,6 +1182,12 @@ const el = {
   shortcutsBtn: document.getElementById('shortcuts-btn'),
   shortcutsModal: document.getElementById('shortcuts-modal'),
   shortcutsCloseBtn: document.getElementById('shortcuts-close-btn'),
+  shortcutsList: document.getElementById('shortcuts-list'),
+  importLyricsBtn: document.getElementById('import-lyrics-btn'),
+  lyricsModal: document.getElementById('lyrics-modal'),
+  lyricsTextarea: document.getElementById('lyrics-textarea'),
+  lyricsCancelBtn: document.getElementById('lyrics-cancel-btn'),
+  lyricsApplyBtn: document.getElementById('lyrics-apply-btn'),
   lineList: document.getElementById('line-list'),
   audio: document.getElementById('audio-el'),
   seekBar: document.getElementById('seek-bar'),
@@ -1051,7 +1200,17 @@ const el = {
   fwd5: document.getElementById('fwd5'),
   setTimeBtn: document.getElementById('set-time-btn'),
   insertPauseBtn: document.getElementById('insert-pause-btn'),
-  tickToggleBtn: document.getElementById('tick-toggle-btn'),
+  speedSelect: document.getElementById('speed-select'),
+  settingsBtn: document.getElementById('settings-btn'),
+  settingsModal: document.getElementById('settings-modal'),
+  settingsCloseBtn: document.getElementById('settings-close-btn'),
+  settingsTickToggle: document.getElementById('settings-tick-toggle'),
+  settingsTickVolume: document.getElementById('settings-tick-volume'),
+  settingsTickVolumeLabel: document.getElementById('settings-tick-volume-label'),
+  settingsNudge: document.getElementById('settings-nudge'),
+  settingsAutoAdvance: document.getElementById('settings-autoadvance'),
+  settingsResetBtn: document.getElementById('settings-reset-btn'),
+  keymapList: document.getElementById('keymap-list'),
   downloadLrcBtn: document.getElementById('download-lrc-btn'),
   embedDownloadBtn: document.getElementById('embed-download-btn'),
   resumeBanner: document.getElementById('resume-banner'),
@@ -1099,9 +1258,43 @@ function renderLineList() {
     if (outOfOrder) row.classList.add('out-of-order');
 
     const time = document.createElement('span');
-    time.className = 'time' + (line.timeMs === null ? ' unset' : '');
-    time.textContent = formatTime(line.timeMs);
-    row.appendChild(time);
+    if (line.id === state.editingTimeLineId) {
+      const timeInput = document.createElement('input');
+      timeInput.type = 'text';
+      timeInput.className = 'time-input';
+      timeInput.value = line.timeMs === null ? '' : formatTime(line.timeMs);
+      timeInput.placeholder = 'mm:ss.xx';
+      row.appendChild(timeInput);
+      setTimeout(() => { timeInput.focus(); timeInput.select(); }, 0);
+      const commitTime = () => {
+        const result = parseTimeInput(timeInput.value);
+        if (!result.ok) {
+          showToast('Couldn\'t read that as a timestamp (try mm:ss.xx)');
+          return;
+        }
+        line.timeMs = result.ms;
+        state.editingTimeLineId = null;
+        markDirty();
+        renderLineList();
+      };
+      timeInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); commitTime(); }
+        else if (e.key === 'Escape') { e.preventDefault(); state.editingTimeLineId = null; renderLineList(); }
+        e.stopPropagation();
+      });
+      timeInput.addEventListener('blur', commitTime);
+      timeInput.addEventListener('click', (e) => e.stopPropagation());
+    } else {
+      time.className = 'time' + (line.timeMs === null ? ' unset' : '');
+      time.textContent = formatTime(line.timeMs);
+      time.title = 'Double-click to type a timestamp';
+      time.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        state.editingTimeLineId = line.id;
+        renderLineList();
+      });
+      row.appendChild(time);
+    }
 
     const playBtn = document.createElement('button');
     playBtn.className = 'play-btn';
@@ -1115,12 +1308,12 @@ function renderLineList() {
     nudge.className = 'nudge';
     const minus = document.createElement('button');
     minus.textContent = '−';
-    minus.title = 'Nudge back 0.1s';
-    minus.addEventListener('click', (e) => { e.stopPropagation(); state.selectedLineId = line.id; nudgeLine(line.id, -100); });
+    minus.title = 'Nudge back ' + (state.nudgeMs / 1000).toFixed(2) + 's';
+    minus.addEventListener('click', (e) => { e.stopPropagation(); state.selectedLineId = line.id; nudgeLine(line.id, -state.nudgeMs); });
     const plus = document.createElement('button');
     plus.textContent = '+';
-    plus.title = 'Nudge forward 0.1s';
-    plus.addEventListener('click', (e) => { e.stopPropagation(); state.selectedLineId = line.id; nudgeLine(line.id, 100); });
+    plus.title = 'Nudge forward ' + (state.nudgeMs / 1000).toFixed(2) + 's';
+    plus.addEventListener('click', (e) => { e.stopPropagation(); state.selectedLineId = line.id; nudgeLine(line.id, state.nudgeMs); });
     nudge.appendChild(minus);
     nudge.appendChild(plus);
     row.appendChild(nudge);
@@ -1153,10 +1346,18 @@ function renderLineList() {
 
       const editBtn = document.createElement('button');
       editBtn.className = 'edit-btn';
-      editBtn.textContent = 'Edit';
+      editBtn.textContent = '✏️';
+      editBtn.title = 'Edit text';
       editBtn.addEventListener('click', (e) => { e.stopPropagation(); state.editingLineId = line.id; renderLineList(); });
       row.appendChild(editBtn);
     }
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'edit-btn delete-btn';
+    deleteBtn.textContent = '🗑️';
+    deleteBtn.title = 'Delete line';
+    deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteLine(line.id); });
+    row.appendChild(deleteBtn);
 
     if (outOfOrder) {
       const warnIcon = document.createElement('span');
@@ -1212,6 +1413,19 @@ function nudgeLine(lineId, deltaMs) {
   renderLineList();
 }
 
+function deleteLine(lineId) {
+  const idx = state.lines.findIndex(l => l.id === lineId);
+  if (idx === -1) return;
+  state.lines.splice(idx, 1);
+  if (state.selectedLineId === lineId) {
+    const next = state.lines[idx] || state.lines[idx - 1];
+    state.selectedLineId = next ? next.id : null;
+  }
+  if (state.playingLineId === lineId) state.playingLineId = null;
+  markDirty();
+  renderLineList();
+}
+
 function nudgeSelected(deltaMs) {
   if (state.selectedLineId == null) { showToast('Select a line first'); return; }
   nudgeLine(state.selectedLineId, deltaMs);
@@ -1244,12 +1458,11 @@ function playFromLine(lineId) {
   el.audio.play();
 }
 
-function playSelectedOrToggle() {
-  if (state.selectedLineId != null) {
-    const line = state.lines.find(l => l.id === state.selectedLineId);
-    if (line && line.timeMs !== null) { playFromLine(state.selectedLineId); return; }
-  }
-  togglePlayPause();
+function playSelectedLine() {
+  if (state.selectedLineId == null) { showToast('Select a line first'); return; }
+  const line = state.lines.find(l => l.id === state.selectedLineId);
+  if (!line || line.timeMs === null) { showToast('This line has no time set yet'); return; }
+  playFromLine(state.selectedLineId);
 }
 
 /* =========================================================================
@@ -1317,12 +1530,14 @@ function playTick() {
   osc.type = 'square';
   osc.frequency.value = 1800;
   const t0 = ctx.currentTime;
-  gain.gain.setValueAtTime(0.0001, t0);
-  gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.002);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.05);
+  // Peak immediately at t0 (no attack ramp) so the loudest instant lines up with the
+  // detected crossing moment as closely as possible, then a quick decay tail.
+  const peak = Math.max(state.tickVolume, 0.0001); // exponentialRamp requires a nonzero start
+  gain.gain.setValueAtTime(peak, t0);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.045);
   osc.connect(gain).connect(ctx.destination);
   osc.start(t0);
-  osc.stop(t0 + 0.06);
+  osc.stop(t0 + 0.05);
 }
 
 let lastTickCheckTime = null; // audio.currentTime (seconds) as of the last tick scan
@@ -1338,6 +1553,15 @@ function checkTicks() {
   lastTickCheckTime = cur;
 }
 
+// timeupdate only fires a handful of times per second in most browsers, which made the
+// tick sound noticeably lag behind the actual crossing point. Polling every animation
+// frame (~60/sec) while playing catches the crossing much closer to when it happens.
+function tickRafLoop() {
+  checkTicks();
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(tickRafLoop);
+}
+if (typeof requestAnimationFrame === 'function') requestAnimationFrame(tickRafLoop);
+
 el.audio.addEventListener('play', () => { el.playPause.textContent = '❚❚'; lastTickCheckTime = el.audio.currentTime; });
 el.audio.addEventListener('pause', () => { el.playPause.textContent = '▶'; });
 el.audio.addEventListener('seeking', () => { lastTickCheckTime = el.audio.currentTime; });
@@ -1348,7 +1572,6 @@ el.audio.addEventListener('loadedmetadata', () => {
 el.audio.addEventListener('timeupdate', () => {
   updateSeekUi();
   updateNowPlayingLine();
-  checkTicks();
 });
 
 el.seekBar.addEventListener('input', () => {
@@ -1382,50 +1605,231 @@ el.insertPauseBtn.addEventListener('click', () => {
 /* =========================================================================
    Keyboard shortcuts (only while a song is loaded and not editing text)
    ========================================================================= */
+const DEFAULT_KEYMAP = {
+  selectPrev: 'ArrowUp', selectNext: 'ArrowDown',
+  nudgeBack: 'ArrowLeft', nudgeForward: 'ArrowRight',
+  playPause: ' ', playLine: '.',
+  setTime: 'Enter', clearTime: 'Backspace',
+};
+const KEYMAP_ACTIONS = [
+  { id: 'selectPrev', label: 'Select previous line' },
+  { id: 'selectNext', label: 'Select next line' },
+  { id: 'nudgeBack', label: 'Nudge selected line back' },
+  { id: 'nudgeForward', label: 'Nudge selected line forward' },
+  { id: 'playPause', label: 'Start / stop playback' },
+  { id: 'playLine', label: 'Play from selected line' },
+  { id: 'setTime', label: 'Set selected line\'s time' },
+  { id: 'clearTime', label: 'Clear selected line\'s time' },
+];
+function formatKeyLabel(k) {
+  const map = { ' ': 'Space', 'ArrowUp': '↑', 'ArrowDown': '↓', 'ArrowLeft': '←', 'ArrowRight': '→' };
+  if (map[k] !== undefined) return map[k];
+  if (!k) return '(unset)';
+  return k.length === 1 ? k.toUpperCase() : k;
+}
+function matchesBinding(e, boundKey) {
+  if (e.key === boundKey) return true;
+  if (boundKey === ' ' && e.key === 'Spacebar') return true; // legacy browsers
+  return false;
+}
+
+let capturingAction = null;
 document.addEventListener('keydown', (e) => {
-  if (state.editingLineId != null) return;
+  if (capturingAction) {
+    e.preventDefault();
+    if (e.key !== 'Escape') {
+      const action = capturingAction;
+      const dupe = KEYMAP_ACTIONS.find(a => a.id !== action && state.keymap[a.id] === e.key);
+      if (dupe) showToast('"' + formatKeyLabel(e.key) + '" was also bound to "' + dupe.label + '" — that one won\'t fire anymore');
+      state.keymap[action] = e.key;
+      saveSettings();
+    }
+    capturingAction = null;
+    renderKeymapList();
+    return;
+  }
+  if (state.editingLineId != null || state.editingTimeLineId != null) return;
   const tag = (e.target && e.target.tagName) || '';
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   if (document.getElementById('editor-screen').style.display === 'none') return;
 
-  switch (e.key) {
-    case 'ArrowUp': e.preventDefault(); moveSelection(-1); break;
-    case 'ArrowDown': e.preventDefault(); moveSelection(1); break;
-    case 'ArrowLeft': e.preventDefault(); nudgeSelected(-100); break;
-    case 'ArrowRight': e.preventDefault(); nudgeSelected(100); break;
-    case ' ': case 'Spacebar': e.preventDefault(); playSelectedOrToggle(); break;
-    case 'Enter': e.preventDefault(); setTimeForSelected(); break;
-    case 'Backspace': e.preventDefault(); clearTimeForSelected(); break;
-    default: break;
+  const km = state.keymap;
+  if (matchesBinding(e, km.selectPrev)) { e.preventDefault(); moveSelection(-1); }
+  else if (matchesBinding(e, km.selectNext)) { e.preventDefault(); moveSelection(1); }
+  else if (matchesBinding(e, km.nudgeBack)) { e.preventDefault(); nudgeSelected(-state.nudgeMs); }
+  else if (matchesBinding(e, km.nudgeForward)) { e.preventDefault(); nudgeSelected(state.nudgeMs); }
+  else if (matchesBinding(e, km.playPause)) { e.preventDefault(); togglePlayPause(); }
+  else if (matchesBinding(e, km.playLine)) { e.preventDefault(); playSelectedLine(); }
+  else if (matchesBinding(e, km.setTime)) {
+    e.preventDefault();
+    setTimeForSelected();
+    if (state.autoAdvanceOnEnter) moveSelection(1);
   }
+  else if (matchesBinding(e, km.clearTime)) { e.preventDefault(); clearTimeForSelected(); }
 });
 
 /* =========================================================================
    Shortcuts modal
    ========================================================================= */
-el.shortcutsBtn.addEventListener('click', () => el.shortcutsModal.classList.add('open'));
+el.shortcutsBtn.addEventListener('click', () => {
+  el.shortcutsList.innerHTML = '';
+  KEYMAP_ACTIONS.forEach(action => {
+    const keys = document.createElement('span');
+    keys.className = 'keys';
+    const kbd = document.createElement('kbd');
+    kbd.textContent = formatKeyLabel(state.keymap[action.id]);
+    keys.appendChild(kbd);
+    const desc = document.createElement('span');
+    desc.textContent = action.label;
+    el.shortcutsList.appendChild(keys);
+    el.shortcutsList.appendChild(desc);
+  });
+  el.shortcutsModal.classList.add('open');
+});
 el.shortcutsCloseBtn.addEventListener('click', () => el.shortcutsModal.classList.remove('open'));
 el.shortcutsModal.addEventListener('click', (e) => { if (e.target === el.shortcutsModal) el.shortcutsModal.classList.remove('open'); });
 
 /* =========================================================================
-   Tick-sound toggle
+   Lyrics import / bulk-edit modal — supports both plain and LRC-timed text
    ========================================================================= */
-const TICK_PREF_KEY = 'lrc-timecode-tick-enabled';
-function applyTickButtonUi() {
-  el.tickToggleBtn.textContent = 'Tick sound: ' + (state.tickEnabled ? 'On' : 'Off');
-  el.tickToggleBtn.setAttribute('aria-pressed', String(state.tickEnabled));
-  el.tickToggleBtn.classList.toggle('toggle-on', state.tickEnabled);
+function openLyricsModal() {
+  el.lyricsTextarea.value = state.lines.length ? serializeLines(state.lines) : '';
+  el.lyricsModal.classList.add('open');
+  setTimeout(() => el.lyricsTextarea.focus(), 0);
 }
-try {
-  state.tickEnabled = localStorage.getItem(TICK_PREF_KEY) === '1';
-} catch (e) { /* default off */ }
-applyTickButtonUi();
+function closeLyricsModal() { el.lyricsModal.classList.remove('open'); }
 
-el.tickToggleBtn.addEventListener('click', () => {
+el.importLyricsBtn.addEventListener('click', openLyricsModal);
+el.lyricsCancelBtn.addEventListener('click', closeLyricsModal);
+el.lyricsModal.addEventListener('click', (e) => { if (e.target === el.lyricsModal) closeLyricsModal(); });
+el.lyricsTextarea.addEventListener('dragover', (e) => { e.preventDefault(); });
+el.lyricsTextarea.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!file) return;
+  try {
+    el.lyricsTextarea.value = await file.text();
+    showToast('Loaded "' + file.name + '" — click Apply to use it');
+  } catch (err) {
+    showToast('Could not read that file as text');
+  }
+});
+el.lyricsApplyBtn.addEventListener('click', () => {
+  const text = el.lyricsTextarea.value;
+  const newLines = looksLikeLrc(text) ? parseLrcText(text) : plainTextToLines(text);
+  state.lines = newLines;
+  state.selectedLineId = newLines.length ? newLines[0].id : null;
+  state.playingLineId = null;
+  markDirty();
+  renderLineList();
+  closeLyricsModal();
+  showToast('Lyrics imported');
+});
+
+/* =========================================================================
+   Settings (persisted together in one localStorage entry)
+   ========================================================================= */
+const SETTINGS_KEY = 'lrc-timecode-settings';
+function loadSettings() {
+  let saved = {};
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) saved = JSON.parse(raw);
+  } catch (e) { /* use defaults */ }
+  state.tickEnabled = typeof saved.tickEnabled === 'boolean' ? saved.tickEnabled : false;
+  state.tickVolume = typeof saved.tickVolume === 'number' && saved.tickVolume >= 0 && saved.tickVolume <= 1 ? saved.tickVolume : 0.6;
+  state.nudgeMs = typeof saved.nudgeMs === 'number' && saved.nudgeMs > 0 ? saved.nudgeMs : 100;
+  state.autoAdvanceOnEnter = typeof saved.autoAdvanceOnEnter === 'boolean' ? saved.autoAdvanceOnEnter : false;
+  state.keymap = Object.assign({}, DEFAULT_KEYMAP, saved.keymap || {});
+}
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      tickEnabled: state.tickEnabled,
+      tickVolume: state.tickVolume,
+      nudgeMs: state.nudgeMs,
+      autoAdvanceOnEnter: state.autoAdvanceOnEnter,
+      keymap: state.keymap,
+    }));
+  } catch (e) { /* ignore */ }
+}
+loadSettings();
+
+function applyTickButtonUi() {
+  el.settingsTickToggle.textContent = state.tickEnabled ? 'On' : 'Off';
+  el.settingsTickToggle.setAttribute('aria-pressed', String(state.tickEnabled));
+  el.settingsTickToggle.classList.toggle('toggle-on', state.tickEnabled);
+}
+function renderKeymapList() {
+  el.keymapList.innerHTML = '';
+  KEYMAP_ACTIONS.forEach(action => {
+    const row = document.createElement('div');
+    row.className = 'keymap-row';
+    const label = document.createElement('span');
+    label.textContent = action.label;
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm key-btn';
+    btn.textContent = capturingAction === action.id ? 'Press a key…' : formatKeyLabel(state.keymap[action.id]);
+    btn.addEventListener('click', () => { capturingAction = action.id; renderKeymapList(); });
+    row.appendChild(label);
+    row.appendChild(btn);
+    el.keymapList.appendChild(row);
+  });
+}
+function syncSettingsUi() {
+  applyTickButtonUi();
+  el.settingsTickVolume.value = String(state.tickVolume);
+  el.settingsTickVolumeLabel.textContent = Math.round(state.tickVolume * 100) + '%';
+  el.settingsNudge.value = (state.nudgeMs / 1000).toFixed(2);
+  el.settingsAutoAdvance.checked = state.autoAdvanceOnEnter;
+  renderKeymapList();
+}
+syncSettingsUi();
+
+el.settingsBtn.addEventListener('click', () => { syncSettingsUi(); el.settingsModal.classList.add('open'); });
+el.settingsCloseBtn.addEventListener('click', () => el.settingsModal.classList.remove('open'));
+el.settingsModal.addEventListener('click', (e) => { if (e.target === el.settingsModal) el.settingsModal.classList.remove('open'); });
+
+el.settingsTickToggle.addEventListener('click', () => {
   state.tickEnabled = !state.tickEnabled;
   if (state.tickEnabled) ensureAudioCtx(); // unlock audio output right on this user gesture
   applyTickButtonUi();
-  try { localStorage.setItem(TICK_PREF_KEY, state.tickEnabled ? '1' : '0'); } catch (e) { /* ignore */ }
+  saveSettings();
+});
+el.settingsTickVolume.addEventListener('input', () => {
+  state.tickVolume = Number(el.settingsTickVolume.value);
+  el.settingsTickVolumeLabel.textContent = Math.round(state.tickVolume * 100) + '%';
+});
+el.settingsTickVolume.addEventListener('change', () => {
+  saveSettings();
+  ensureAudioCtx();
+  playTick(); // preview at the new volume
+});
+el.settingsNudge.addEventListener('change', () => {
+  const seconds = parseFloat(el.settingsNudge.value);
+  if (isFinite(seconds) && seconds > 0) {
+    state.nudgeMs = Math.round(seconds * 1000);
+  }
+  el.settingsNudge.value = (state.nudgeMs / 1000).toFixed(2);
+  saveSettings();
+});
+el.settingsAutoAdvance.addEventListener('change', () => {
+  state.autoAdvanceOnEnter = el.settingsAutoAdvance.checked;
+  saveSettings();
+});
+el.settingsResetBtn.addEventListener('click', () => {
+  state.tickEnabled = false;
+  state.tickVolume = 0.6;
+  state.nudgeMs = 100;
+  state.autoAdvanceOnEnter = false;
+  state.keymap = Object.assign({}, DEFAULT_KEYMAP);
+  saveSettings();
+  syncSettingsUi();
+  showToast('Settings reset to defaults');
+});
+
+el.speedSelect.addEventListener('change', () => {
+  el.audio.playbackRate = Number(el.speedSelect.value);
 });
 
 
@@ -1480,6 +1884,7 @@ async function loadMp3File(file, opts) {
   state.selectedLineId = state.lines.length ? state.lines[0].id : null;
   state.playingLineId = null;
   state.editingLineId = null;
+  state.editingTimeLineId = null;
   lastTickCheckTime = null;
 
   if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
@@ -1500,6 +1905,10 @@ async function loadMp3File(file, opts) {
     ? 'Session restored'
     : (state.lines.length ? 'Loaded existing lyrics from the file' : 'No existing lyrics found — starting blank');
   showToast(sourceNote);
+
+  if (!opts.restoredLines && state.lines.length === 0) {
+    openLyricsModal();
+  }
 }
 
 function handleFileChosen(file) {
@@ -1548,6 +1957,19 @@ el.resumeReattachBtn.addEventListener('click', () => {
     showToast('Could not load saved session');
   }
 });
+el.resumeBanner.addEventListener('dragover', (e) => { e.preventDefault(); el.resumeBanner.classList.add('drag-over'); });
+el.resumeBanner.addEventListener('dragleave', () => el.resumeBanner.classList.remove('drag-over'));
+el.resumeBanner.addEventListener('drop', (e) => {
+  e.preventDefault();
+  el.resumeBanner.classList.remove('drag-over');
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!file) return;
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (raw) pendingResumeData = JSON.parse(raw);
+  } catch (err) { /* ignore — handled as a fresh load below */ }
+  handleFileChosen(file);
+});
 el.resumeDiscardBtn.addEventListener('click', () => {
   clearSession();
   el.resumeBanner.style.display = 'none';
@@ -1586,7 +2008,7 @@ el.embedDownloadBtn.addEventListener('click', () => {
     const lrcText = serializeLines(state.lines);
     const newBuffer = embedLyrics(state.fileBuffer, lrcText, 'und');
     const blob = new Blob([newBuffer], { type: 'audio/mpeg' });
-    downloadBlob(blob, baseName(state.fileName) + '-lrc.mp3');
+    downloadBlob(blob, state.fileName);
     state.dirty = false;
     scheduleSave();
     showToast(dummyCount > 0
@@ -1617,6 +2039,7 @@ function resetToUpload() {
   state.selectedLineId = null;
   state.playingLineId = null;
   state.editingLineId = null;
+  state.editingTimeLineId = null;
   state.dirty = false;
   lastTickCheckTime = null;
 
