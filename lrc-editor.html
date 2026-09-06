@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; media-src blob:; img-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Timecode — LRC Lyrics Editor</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%2312151c%22%2F%3E%3Cpath%20d%3D%22M11%208l15%208-15%208z%22%20fill%3D%22%23e8a33d%22%2F%3E%3C%2Fsvg%3E">
 <style>
   :root{
     --bg:#12151c;
@@ -119,6 +121,52 @@
     background:var(--line);
     margin:0 2px;
   }
+  .split-btn{
+    position:relative;
+    display:inline-flex;
+    border-radius:var(--radius);
+    overflow:hidden; /* clips both children to one unified rounded shape */
+  }
+  .split-btn > button{
+    border:none;
+    border-radius:0;
+  }
+  .split-btn-caret{
+    padding:8px 10px;
+    position:relative;
+  }
+  .split-btn-caret::before{
+    content:'';
+    position:absolute;
+    left:0;
+    top:22%;
+    bottom:22%;
+    width:1px;
+    background:rgba(0,0,0,0.25);
+  }
+  .dropdown-menu{
+    display:none;
+    flex-direction:column;
+    position:absolute;
+    top:100%;
+    right:0;
+    margin-top:4px;
+    background:var(--panel-raised);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    min-width:220px;
+    overflow:hidden;
+    z-index:30;
+  }
+  .dropdown-menu.open{ display:flex; }
+  .dropdown-menu button{
+    padding:9px 12px;
+    text-align:left;
+    font-size:13px;
+    color:var(--text);
+  }
+  .dropdown-menu button:hover{ background:var(--panel); }
+  .dropdown-menu button.current{ color:var(--amber); }
   .btn{
     padding:8px 14px;
     border-radius:var(--radius);
@@ -362,6 +410,9 @@
     color:var(--text-faint);
     padding:4px 6px;
     border-radius:4px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
   }
   .lrc-line .edit-btn:hover{ color:var(--text); background:var(--panel-raised); }
   .lrc-line .delete-btn:hover{ background:rgba(217,83,79,0.15); }
@@ -518,16 +569,6 @@
     gap:8px;
     margin-top:20px;
   }
-  .shortcuts-list{
-    display:grid;
-    grid-template-columns:auto 1fr;
-    gap:10px 16px;
-    font-size:13.5px;
-    color:var(--text-dim);
-    align-items:center;
-  }
-  .shortcuts-list .keys{ white-space:nowrap; }
-
   .settings-row{
     display:flex;
     align-items:center;
@@ -551,7 +592,7 @@
     display:flex;
     flex-direction:column;
     gap:8px;
-    max-height:240px;
+    max-height:70vh;
     overflow-y:auto;
     margin-bottom:6px;
   }
@@ -608,12 +649,19 @@
   </div>
   <div class="header-actions">
     <button class="btn btn-quiet btn-sm" id="settings-btn">⚙ Settings</button>
-    <button class="btn btn-quiet btn-sm" id="shortcuts-btn">⌨ Shortcuts</button>
+    <button class="btn btn-quiet btn-sm" id="keybindings-btn">⌨ Key bindings</button>
     <div class="divider" id="file-actions-divider" style="display:none;"></div>
     <div class="header-actions" id="file-actions" style="display:none; padding:0;">
       <button class="btn btn-sm" id="import-lyrics-btn">Import/edit lyrics text</button>
-      <button class="btn btn-sm" id="download-lrc-btn">Download .lrc</button>
-      <button class="btn btn-primary btn-sm" id="embed-download-btn">Embed &amp; download .mp3</button>
+      <div class="split-btn" id="export-split-btn">
+        <button class="btn btn-primary btn-sm split-btn-main" id="export-primary-btn">Download .lrc</button>
+        <button class="btn btn-primary btn-sm split-btn-caret" id="export-caret-btn" aria-label="Other export options" aria-haspopup="true" aria-expanded="false">▾</button>
+        <div class="dropdown-menu" id="export-menu">
+          <button type="button" data-action="lrc">Download .lrc</button>
+          <button type="button" data-action="mp3">Embed &amp; download .mp3</button>
+          <button type="button" data-action="clipboard">Copy .lrc to clipboard</button>
+        </div>
+      </div>
       <button class="btn btn-quiet btn-sm btn-danger-text" id="new-song-btn">New song</button>
     </div>
   </div>
@@ -650,9 +698,12 @@
       <h2>Along the way</h2>
       <ul>
         <li>Your lyrics and timestamps auto-save in this browser as you work, so an accidental tab close won't lose your progress — you'll just need to re-select the same MP3 file to reattach the audio.</li>
-        <li>See the <strong>Shortcuts</strong> button (top right) for the full list of keyboard controls.</li>
+        <li>See the <strong>Key bindings</strong> button (top right) for the full list of keyboard controls, and to remap them.</li>
       </ul>
     </div>
+    <p style="margin-top:18px; font-size:12.5px; color:var(--text-faint);">
+      <a href="https://github.com/six-two/lrc-creator-webpage" target="_blank" rel="noopener noreferrer" style="color:var(--text-faint);">Source code on GitHub</a>
+    </p>
   </div>
 </div>
 
@@ -701,13 +752,14 @@
   </div>
 </div>
 
-<div class="modal-overlay" id="shortcuts-modal">
+<div class="modal-overlay" id="keybindings-modal">
   <div class="modal modal-wide">
-    <h2>Keyboard shortcuts</h2>
-    <p style="margin-bottom:14px;">Active whenever a song is loaded and you're not editing a line's text. Change these in Settings.</p>
-    <div class="shortcuts-list" id="shortcuts-list"></div>
+    <h2>Key bindings</h2>
+    <p style="margin-bottom:14px;">Active whenever a song is loaded and you're not editing a line's text. Click a key, then press the new key you want. Press Escape to cancel.</p>
+    <div id="keymap-list"></div>
     <div class="modal-actions">
-      <button class="btn btn-primary" id="shortcuts-close-btn">Got it</button>
+      <button class="btn btn-quiet" id="keybindings-reset-btn">Reset key bindings</button>
+      <button class="btn btn-primary" id="keybindings-close-btn">Done</button>
     </div>
   </div>
 </div>
@@ -730,14 +782,18 @@
       <span>Nudge amount (← / → and per-line −/+)</span>
       <span><input type="number" id="settings-nudge" min="0.01" max="5" step="0.01" style="width:70px;"> s</span>
     </div>
-    <label class="settings-row" style="cursor:pointer;">
+    <div class="settings-row">
       <span>Jump to next line automatically after setting a line's time (Enter)</span>
-      <input type="checkbox" id="settings-autoadvance">
-    </label>
-
-    <h2 style="margin-top:20px;">Key bindings</h2>
-    <p style="margin-bottom:10px;">Click a key, then press the new key you want. Press Escape to cancel.</p>
-    <div id="keymap-list"></div>
+      <button class="btn btn-sm transport-btn" id="settings-autoadvance-toggle" aria-pressed="false">Off</button>
+    </div>
+    <div class="settings-row">
+      <span>Default export button action</span>
+      <select id="settings-default-export" class="btn btn-sm transport-btn">
+        <option value="lrc">Download .lrc</option>
+        <option value="mp3">Embed &amp; download .mp3</option>
+        <option value="clipboard">Copy .lrc to clipboard</option>
+      </select>
+    </div>
 
     <div class="modal-actions">
       <button class="btn btn-quiet" id="settings-reset-btn">Reset to defaults</button>
@@ -1001,6 +1057,11 @@ function embedLyrics(arrayBuffer, lrcText, language) {
 /* =========================================================================
    App state & helpers
    ========================================================================= */
+/* Inline SVG icons (not emoji) so they render consistently regardless of whether the
+   system/browser has a color-emoji font installed — plain vector paths always draw. */
+const ICON_EDIT = '<svg viewBox="0 0 20 20" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 3.4l3.2 3.2L6.3 17H3.1v-3.2L13.4 3.4z"/></svg>';
+const ICON_DELETE = '<svg viewBox="0 0 20 20" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h12M8 6V4.6C8 3.7 8.7 3 9.6 3h.8c.9 0 1.6.7 1.6 1.6V6M6.2 6l.7 9.8c.1 1 .9 1.7 1.9 1.7h2.4c1 0 1.8-.7 1.9-1.7L13.8 6"/></svg>';
+
 const state = {
   fileName: null,
   fileBuffer: null,      // ArrayBuffer of the currently loaded mp3 (used for re-embedding)
@@ -1179,10 +1240,10 @@ const el = {
   fileActions: document.getElementById('file-actions'),
   fileActionsDivider: document.getElementById('file-actions-divider'),
   newSongBtn: document.getElementById('new-song-btn'),
-  shortcutsBtn: document.getElementById('shortcuts-btn'),
-  shortcutsModal: document.getElementById('shortcuts-modal'),
-  shortcutsCloseBtn: document.getElementById('shortcuts-close-btn'),
-  shortcutsList: document.getElementById('shortcuts-list'),
+  keybindingsBtn: document.getElementById('keybindings-btn'),
+  keybindingsModal: document.getElementById('keybindings-modal'),
+  keybindingsCloseBtn: document.getElementById('keybindings-close-btn'),
+  keybindingsResetBtn: document.getElementById('keybindings-reset-btn'),
   importLyricsBtn: document.getElementById('import-lyrics-btn'),
   lyricsModal: document.getElementById('lyrics-modal'),
   lyricsTextarea: document.getElementById('lyrics-textarea'),
@@ -1208,11 +1269,13 @@ const el = {
   settingsTickVolume: document.getElementById('settings-tick-volume'),
   settingsTickVolumeLabel: document.getElementById('settings-tick-volume-label'),
   settingsNudge: document.getElementById('settings-nudge'),
-  settingsAutoAdvance: document.getElementById('settings-autoadvance'),
+  settingsAutoAdvanceToggle: document.getElementById('settings-autoadvance-toggle'),
+  settingsDefaultExport: document.getElementById('settings-default-export'),
   settingsResetBtn: document.getElementById('settings-reset-btn'),
   keymapList: document.getElementById('keymap-list'),
-  downloadLrcBtn: document.getElementById('download-lrc-btn'),
-  embedDownloadBtn: document.getElementById('embed-download-btn'),
+  exportPrimaryBtn: document.getElementById('export-primary-btn'),
+  exportCaretBtn: document.getElementById('export-caret-btn'),
+  exportMenu: document.getElementById('export-menu'),
   resumeBanner: document.getElementById('resume-banner'),
   resumeReattachBtn: document.getElementById('resume-reattach-btn'),
   resumeDiscardBtn: document.getElementById('resume-discard-btn'),
@@ -1284,6 +1347,7 @@ function renderLineList() {
       });
       timeInput.addEventListener('blur', commitTime);
       timeInput.addEventListener('click', (e) => e.stopPropagation());
+      timeInput.addEventListener('dblclick', (e) => e.stopPropagation()); // let native word/text selection work
     } else {
       time.className = 'time' + (line.timeMs === null ? ' unset' : '');
       time.textContent = formatTime(line.timeMs);
@@ -1338,6 +1402,7 @@ function renderLineList() {
       });
       input.addEventListener('blur', commit);
       input.addEventListener('click', (e) => e.stopPropagation());
+      input.addEventListener('dblclick', (e) => e.stopPropagation()); // let native word selection work while editing
     } else {
       const text = document.createElement('span');
       text.className = 'text' + (line.text.trim() === '' ? ' empty' : '');
@@ -1346,7 +1411,7 @@ function renderLineList() {
 
       const editBtn = document.createElement('button');
       editBtn.className = 'edit-btn';
-      editBtn.textContent = '✏️';
+      editBtn.innerHTML = ICON_EDIT;
       editBtn.title = 'Edit text';
       editBtn.addEventListener('click', (e) => { e.stopPropagation(); state.editingLineId = line.id; renderLineList(); });
       row.appendChild(editBtn);
@@ -1354,7 +1419,7 @@ function renderLineList() {
 
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'edit-btn delete-btn';
-    deleteBtn.textContent = '🗑️';
+    deleteBtn.innerHTML = ICON_DELETE;
     deleteBtn.title = 'Delete line';
     deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteLine(line.id); });
     row.appendChild(deleteBtn);
@@ -1372,6 +1437,7 @@ function renderLineList() {
     row.addEventListener('click', () => selectLine(line.id));
     row.addEventListener('dblclick', (e) => {
       e.stopPropagation();
+      if (state.editingLineId === line.id || state.editingTimeLineId === line.id) return; // already editing — let native word-select happen
       state.editingLineId = line.id;
       renderLineList();
     });
@@ -1591,7 +1657,7 @@ el.back1.addEventListener('click', () => seekBy(-1));
 el.fwd1.addEventListener('click', () => seekBy(1));
 el.fwd5.addEventListener('click', () => seekBy(5));
 el.setTimeBtn.addEventListener('click', setTimeForSelected);
-el.insertPauseBtn.addEventListener('click', () => {
+function insertLineAtCurrentTime() {
   const timeMs = Math.round(el.audio.currentTime * 1000);
   const newLine = makeLine(timeMs, '');
   let insertAt = state.lines.length;
@@ -1600,7 +1666,8 @@ el.insertPauseBtn.addEventListener('click', () => {
   state.lines.splice(insertAt, 0, newLine);
   markDirty();
   selectLine(newLine.id);
-});
+}
+el.insertPauseBtn.addEventListener('click', insertLineAtCurrentTime);
 
 /* =========================================================================
    Keyboard shortcuts (only while a song is loaded and not editing text)
@@ -1610,6 +1677,7 @@ const DEFAULT_KEYMAP = {
   nudgeBack: 'ArrowLeft', nudgeForward: 'ArrowRight',
   playPause: ' ', playLine: '.',
   setTime: 'Enter', clearTime: 'Backspace',
+  insertLine: 'n',
 };
 const KEYMAP_ACTIONS = [
   { id: 'selectPrev', label: 'Select previous line' },
@@ -1620,6 +1688,7 @@ const KEYMAP_ACTIONS = [
   { id: 'playLine', label: 'Play from selected line' },
   { id: 'setTime', label: 'Set selected line\'s time' },
   { id: 'clearTime', label: 'Clear selected line\'s time' },
+  { id: 'insertLine', label: 'Insert empty line at current time' },
 ];
 function formatKeyLabel(k) {
   const map = { ' ': 'Space', 'ArrowUp': '↑', 'ArrowDown': '↓', 'ArrowLeft': '←', 'ArrowRight': '→' };
@@ -1666,28 +1735,21 @@ document.addEventListener('keydown', (e) => {
     if (state.autoAdvanceOnEnter) moveSelection(1);
   }
   else if (matchesBinding(e, km.clearTime)) { e.preventDefault(); clearTimeForSelected(); }
+  else if (matchesBinding(e, km.insertLine)) { e.preventDefault(); insertLineAtCurrentTime(); }
 });
 
 /* =========================================================================
-   Shortcuts modal
+   Key bindings modal (editable — renderKeymapList is defined further down)
    ========================================================================= */
-el.shortcutsBtn.addEventListener('click', () => {
-  el.shortcutsList.innerHTML = '';
-  KEYMAP_ACTIONS.forEach(action => {
-    const keys = document.createElement('span');
-    keys.className = 'keys';
-    const kbd = document.createElement('kbd');
-    kbd.textContent = formatKeyLabel(state.keymap[action.id]);
-    keys.appendChild(kbd);
-    const desc = document.createElement('span');
-    desc.textContent = action.label;
-    el.shortcutsList.appendChild(keys);
-    el.shortcutsList.appendChild(desc);
-  });
-  el.shortcutsModal.classList.add('open');
+el.keybindingsBtn.addEventListener('click', () => { renderKeymapList(); el.keybindingsModal.classList.add('open'); });
+el.keybindingsCloseBtn.addEventListener('click', () => { capturingAction = null; el.keybindingsModal.classList.remove('open'); });
+el.keybindingsModal.addEventListener('click', (e) => { if (e.target === el.keybindingsModal) { capturingAction = null; el.keybindingsModal.classList.remove('open'); } });
+el.keybindingsResetBtn.addEventListener('click', () => {
+  state.keymap = Object.assign({}, DEFAULT_KEYMAP);
+  saveSettings();
+  renderKeymapList();
+  showToast('Key bindings reset to defaults');
 });
-el.shortcutsCloseBtn.addEventListener('click', () => el.shortcutsModal.classList.remove('open'));
-el.shortcutsModal.addEventListener('click', (e) => { if (e.target === el.shortcutsModal) el.shortcutsModal.classList.remove('open'); });
 
 /* =========================================================================
    Lyrics import / bulk-edit modal — supports both plain and LRC-timed text
@@ -1730,6 +1792,11 @@ el.lyricsApplyBtn.addEventListener('click', () => {
    Settings (persisted together in one localStorage entry)
    ========================================================================= */
 const SETTINGS_KEY = 'lrc-timecode-settings';
+const EXPORT_ACTIONS = [
+  { id: 'lrc', label: 'Download .lrc' },
+  { id: 'mp3', label: 'Embed & download .mp3' },
+  { id: 'clipboard', label: 'Copy .lrc to clipboard' },
+];
 function loadSettings() {
   let saved = {};
   try {
@@ -1740,6 +1807,7 @@ function loadSettings() {
   state.tickVolume = typeof saved.tickVolume === 'number' && saved.tickVolume >= 0 && saved.tickVolume <= 1 ? saved.tickVolume : 0.6;
   state.nudgeMs = typeof saved.nudgeMs === 'number' && saved.nudgeMs > 0 ? saved.nudgeMs : 100;
   state.autoAdvanceOnEnter = typeof saved.autoAdvanceOnEnter === 'boolean' ? saved.autoAdvanceOnEnter : false;
+  state.defaultExportAction = EXPORT_ACTIONS.some(a => a.id === saved.defaultExportAction) ? saved.defaultExportAction : 'lrc';
   state.keymap = Object.assign({}, DEFAULT_KEYMAP, saved.keymap || {});
 }
 function saveSettings() {
@@ -1749,6 +1817,7 @@ function saveSettings() {
       tickVolume: state.tickVolume,
       nudgeMs: state.nudgeMs,
       autoAdvanceOnEnter: state.autoAdvanceOnEnter,
+      defaultExportAction: state.defaultExportAction,
       keymap: state.keymap,
     }));
   } catch (e) { /* ignore */ }
@@ -1759,6 +1828,11 @@ function applyTickButtonUi() {
   el.settingsTickToggle.textContent = state.tickEnabled ? 'On' : 'Off';
   el.settingsTickToggle.setAttribute('aria-pressed', String(state.tickEnabled));
   el.settingsTickToggle.classList.toggle('toggle-on', state.tickEnabled);
+}
+function applyAutoAdvanceButtonUi() {
+  el.settingsAutoAdvanceToggle.textContent = state.autoAdvanceOnEnter ? 'On' : 'Off';
+  el.settingsAutoAdvanceToggle.setAttribute('aria-pressed', String(state.autoAdvanceOnEnter));
+  el.settingsAutoAdvanceToggle.classList.toggle('toggle-on', state.autoAdvanceOnEnter);
 }
 function renderKeymapList() {
   el.keymapList.innerHTML = '';
@@ -1781,8 +1855,8 @@ function syncSettingsUi() {
   el.settingsTickVolume.value = String(state.tickVolume);
   el.settingsTickVolumeLabel.textContent = Math.round(state.tickVolume * 100) + '%';
   el.settingsNudge.value = (state.nudgeMs / 1000).toFixed(2);
-  el.settingsAutoAdvance.checked = state.autoAdvanceOnEnter;
-  renderKeymapList();
+  applyAutoAdvanceButtonUi();
+  el.settingsDefaultExport.value = state.defaultExportAction;
 }
 syncSettingsUi();
 
@@ -1813,18 +1887,25 @@ el.settingsNudge.addEventListener('change', () => {
   el.settingsNudge.value = (state.nudgeMs / 1000).toFixed(2);
   saveSettings();
 });
-el.settingsAutoAdvance.addEventListener('change', () => {
-  state.autoAdvanceOnEnter = el.settingsAutoAdvance.checked;
+el.settingsAutoAdvanceToggle.addEventListener('click', () => {
+  state.autoAdvanceOnEnter = !state.autoAdvanceOnEnter;
+  applyAutoAdvanceButtonUi();
   saveSettings();
+});
+el.settingsDefaultExport.addEventListener('change', () => {
+  state.defaultExportAction = el.settingsDefaultExport.value;
+  saveSettings();
+  updateExportButtonUi();
 });
 el.settingsResetBtn.addEventListener('click', () => {
   state.tickEnabled = false;
   state.tickVolume = 0.6;
   state.nudgeMs = 100;
   state.autoAdvanceOnEnter = false;
-  state.keymap = Object.assign({}, DEFAULT_KEYMAP);
+  state.defaultExportAction = 'lrc';
   saveSettings();
   syncSettingsUi();
+  updateExportButtonUi();
   showToast('Settings reset to defaults');
 });
 
@@ -1989,7 +2070,7 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-el.downloadLrcBtn.addEventListener('click', () => {
+function performDownloadLrc() {
   const dummyCount = state.lines.filter(l => l.timeMs === null).length;
   const text = serializeLines(state.lines);
   const blob = new Blob([text], { type: 'text/plain' });
@@ -1999,9 +2080,9 @@ el.downloadLrcBtn.addEventListener('click', () => {
   showToast(dummyCount > 0
     ? 'Downloaded .lrc (' + dummyCount + ' untimed line' + (dummyCount === 1 ? '' : 's') + ' used a placeholder time)'
     : 'Downloaded .lrc file');
-});
+}
 
-el.embedDownloadBtn.addEventListener('click', () => {
+function performEmbedDownload() {
   if (!state.fileBuffer) return;
   try {
     const dummyCount = state.lines.filter(l => l.timeMs === null).length;
@@ -2018,6 +2099,84 @@ el.embedDownloadBtn.addEventListener('click', () => {
     console.error(e);
     showToast('Embedding failed — see console for details');
   }
+}
+
+// Fallback for contexts where navigator.clipboard is unavailable or blocked
+// (e.g. some file:// origins aren't treated as a "secure context").
+function fallbackCopyToClipboard(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+function performCopyToClipboard() {
+  const dummyCount = state.lines.filter(l => l.timeMs === null).length;
+  const text = serializeLines(state.lines);
+  const finish = () => {
+    state.dirty = false;
+    scheduleSave();
+    showToast(dummyCount > 0
+      ? 'Copied .lrc (' + dummyCount + ' untimed line' + (dummyCount === 1 ? '' : 's') + ' used a placeholder time)'
+      : 'Copied .lrc to clipboard');
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(finish).catch(() => {
+      if (fallbackCopyToClipboard(text)) finish();
+      else showToast('Could not copy — try downloading instead');
+    });
+  } else if (fallbackCopyToClipboard(text)) {
+    finish();
+  } else {
+    showToast('Could not copy — try downloading instead');
+  }
+}
+
+function performExport(action) {
+  if (action === 'lrc') performDownloadLrc();
+  else if (action === 'mp3') performEmbedDownload();
+  else if (action === 'clipboard') performCopyToClipboard();
+}
+
+function updateExportButtonUi() {
+  const action = EXPORT_ACTIONS.find(a => a.id === state.defaultExportAction) || EXPORT_ACTIONS[0];
+  el.exportPrimaryBtn.textContent = action.label;
+}
+updateExportButtonUi();
+
+el.exportPrimaryBtn.addEventListener('click', () => performExport(state.defaultExportAction));
+el.exportCaretBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const opening = !el.exportMenu.classList.contains('open');
+  el.exportMenu.classList.toggle('open', opening);
+  el.exportCaretBtn.setAttribute('aria-expanded', String(opening));
+  if (opening) {
+    el.exportMenu.querySelectorAll('button[data-action]').forEach(btn => {
+      btn.classList.toggle('current', btn.dataset.action === state.defaultExportAction);
+    });
+  }
+});
+document.addEventListener('click', () => {
+  el.exportMenu.classList.remove('open');
+  el.exportCaretBtn.setAttribute('aria-expanded', 'false');
+});
+el.exportMenu.querySelectorAll('button[data-action]').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    el.exportMenu.classList.remove('open');
+    el.exportCaretBtn.setAttribute('aria-expanded', 'false');
+    performExport(btn.dataset.action);
+  });
 });
 
 
