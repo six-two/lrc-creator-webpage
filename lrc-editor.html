@@ -178,6 +178,14 @@
   }
   .btn:hover:not(:disabled){ border-color:var(--text-faint); }
   .btn-sm{ padding:6px 10px; font-size:13px; }
+  .btn-icon{
+    padding:6px 9px;
+    font-size:19px;
+    line-height:1;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+  }
   .btn-primary{
     background:var(--amber);
     color:#20160a;
@@ -397,7 +405,7 @@
   .lrc-line .text{
     flex:1;
     min-width:0;
-    white-space:normal;
+    white-space:pre-wrap;
     overflow-wrap:anywhere;
   }
   .lrc-line .text.empty{
@@ -408,6 +416,11 @@
     flex:1;
     min-width:0;
     width:100%;
+    font-family:inherit;
+    font-size:inherit;
+    line-height:1.5;
+    resize:vertical;
+    overflow-wrap:anywhere;
   }
   .lrc-line .edit-btn{
     flex-shrink:0;
@@ -652,8 +665,6 @@
     <span class="file-name" id="header-filename"></span>
   </div>
   <div class="header-actions">
-    <button class="btn btn-quiet btn-sm" id="settings-btn">⚙ Settings</button>
-    <button class="btn btn-quiet btn-sm" id="keybindings-btn">⌨ Key bindings</button>
     <div class="divider" id="file-actions-divider" style="display:none;"></div>
     <div class="header-actions" id="file-actions" style="display:none; padding:0;">
       <button class="btn btn-sm" id="import-lyrics-btn">Import/edit lyrics text</button>
@@ -666,7 +677,10 @@
           <button type="button" data-action="clipboard">Copy .lrc to clipboard</button>
         </div>
       </div>
-      <button class="btn btn-quiet btn-sm btn-danger-text" id="new-song-btn">New song</button>
+      <span class="divider"></span>
+      <button class="btn btn-quiet btn-icon" id="settings-btn" title="Settings" aria-label="Settings">⚙</button>
+      <button class="btn btn-quiet btn-icon" id="keybindings-btn" title="Key bindings" aria-label="Key bindings">⌨</button>
+      <button class="btn btn-quiet btn-icon btn-danger-text" id="new-song-btn" title="New song (discards current file)" aria-label="New song"><svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h12M8 6V4.6C8 3.7 8.7 3 9.6 3h.8c.9 0 1.6.7 1.6 1.6V6M6.2 6l.7 9.8c.1 1 .9 1.7 1.9 1.7h2.4c1 0 1.8-.7 1.9-1.7L13.8 6"/></svg></button>
     </div>
   </div>
 </header>
@@ -1113,9 +1127,14 @@ function parseTimeInput(str) {
 
 const LRC_TAG_RE = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
 
+// Groups any plain (untagged) lines following a timestamped line into that same
+// entry's text (joined by \n), so multi-line content (translations, romanizations,
+// etc.) under one timestamp round-trips correctly instead of being split apart.
 function parseLrcText(text) {
   const lines = [];
   const rawLines = text.split(/\r\n|\r|\n/);
+  while (rawLines.length && rawLines[rawLines.length - 1].trim() === '') rawLines.pop();
+  let current = null; // { timeMs, textLines: [] }
   for (const raw of rawLines) {
     LRC_TAG_RE.lastIndex = 0;
     const tags = [];
@@ -1128,10 +1147,18 @@ function parseLrcText(text) {
       const ms = mins * 60000 + secs * 1000 + parseInt(frac, 10);
       tags.push(ms);
     }
-    if (tags.length === 0) continue;
-    const content = raw.replace(LRC_TAG_RE, '').trim();
-    for (const ms of tags) lines.push(makeLine(ms, content));
+    if (tags.length > 0) {
+      if (current) lines.push(makeLine(current.timeMs, current.textLines.join('\n')));
+      const content = raw.replace(LRC_TAG_RE, '').trim();
+      for (let i = 0; i < tags.length - 1; i++) lines.push(makeLine(tags[i], content));
+      current = { timeMs: tags[tags.length - 1], textLines: [content] };
+    } else if (current) {
+      current.textLines.push(raw);
+    } else {
+      lines.push(makeLine(null, raw.trim()));
+    }
   }
+  if (current) lines.push(makeLine(current.timeMs, current.textLines.join('\n')));
   return lines;
 }
 
@@ -1382,9 +1409,12 @@ function renderLineList() {
     row.appendChild(nudge);
 
     if (line.id === state.editingLineId) {
-      const input = document.createElement('input');
-      input.type = 'text';
+      // A textarea (not a single-line input) so multi-line entries — translations,
+      // romanizations, etc. stacked under one timestamp — can actually be edited.
+      const input = document.createElement('textarea');
       input.className = 'text-input';
+      input.rows = Math.max(1, line.text.split('\n').length);
+      input.title = 'Enter: new line. Shift+Enter or click away: save. Escape: cancel.';
       input.value = line.text;
       row.appendChild(input);
       setTimeout(() => { input.focus(); input.select(); }, 0);
@@ -1395,8 +1425,9 @@ function renderLineList() {
         renderLineList();
       };
       input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); }
         else if (e.key === 'Escape') { e.preventDefault(); state.editingLineId = null; renderLineList(); }
+        // Plain Enter is left alone here so it inserts a newline, like a normal textarea.
         e.stopPropagation(); // never let per-line editing leak into global shortcuts
       });
       input.addEventListener('blur', commit);
@@ -1658,12 +1689,22 @@ el.fwd5.addEventListener('click', () => seekBy(5));
 function insertLineAtCurrentTime() {
   const timeMs = Math.round(el.audio.currentTime * 1000);
   const newLine = makeLine(timeMs, '');
-  let insertAt = state.lines.length;
   const selIdx = state.lines.findIndex(l => l.id === state.selectedLineId);
-  if (selIdx !== -1) insertAt = selIdx + 1;
+  const isLast = selIdx !== -1 && selIdx === state.lines.length - 1;
+  let insertAt = state.lines.length;
+  let keepOriginalSelected = false;
+  if (selIdx !== -1) {
+    if (state.autoAdvanceOnEnter && !isLast) {
+      insertAt = selIdx; // before the selected line, which shifts down and stays selected
+      keepOriginalSelected = true;
+    } else {
+      insertAt = selIdx + 1; // after (autoAdvance off, or nothing to advance to — selected is last)
+    }
+  }
   state.lines.splice(insertAt, 0, newLine);
   markDirty();
-  selectLine(newLine.id);
+  if (keepOriginalSelected) selectLine(state.selectedLineId);
+  else selectLine(newLine.id);
 }
 
 /* =========================================================================
@@ -1676,6 +1717,7 @@ const DEFAULT_KEYMAP = {
   setTime: 'Enter', clearTime: 'Backspace',
   insertLine: 'n',
   seekBack5: 'b', seekBack1: '', seekFwd1: '', seekFwd5: '',
+  editText: 'e', deleteLine: 'Shift+Delete',
 };
 const KEYMAP_ACTIONS = [
   { id: 'selectPrev', label: 'Select previous line' },
@@ -1691,29 +1733,43 @@ const KEYMAP_ACTIONS = [
   { id: 'seekBack1', label: 'Seek back 1s' },
   { id: 'seekFwd1', label: 'Seek forward 1s' },
   { id: 'seekFwd5', label: 'Seek forward 5s' },
+  { id: 'editText', label: 'Edit selected line\'s text' },
+  { id: 'deleteLine', label: 'Delete selected line' },
 ];
 function formatKeyLabel(k) {
-  const map = { ' ': 'Space', 'ArrowUp': '↑', 'ArrowDown': '↓', 'ArrowLeft': '←', 'ArrowRight': '→' };
-  if (map[k] !== undefined) return map[k];
   if (!k) return '(unset)';
-  return k.length === 1 ? k.toUpperCase() : k;
+  const map = { ' ': 'Space', 'ArrowUp': '↑', 'ArrowDown': '↓', 'ArrowLeft': '←', 'ArrowRight': '→' };
+  return k.split('+').map(part => map[part] !== undefined ? map[part] : (part.length === 1 ? part.toUpperCase() : part)).join('+');
+}
+// Builds a "Ctrl+Alt+Shift+Meta+Key" style string from a keydown event, so bindings
+// can require modifier combos (e.g. Shift+Delete) and not just a bare key.
+function eventToKeyString(e) {
+  const parts = [];
+  if (e.ctrlKey) parts.push('Ctrl');
+  if (e.altKey) parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+  if (e.metaKey) parts.push('Meta');
+  parts.push(e.key);
+  return parts.join('+');
 }
 function matchesBinding(e, boundKey) {
   if (!boundKey) return false; // empty binding = unbound, never fires
-  if (e.key === boundKey) return true;
-  if (boundKey === ' ' && e.key === 'Spacebar') return true; // legacy browsers
+  if (eventToKeyString(e) === boundKey) return true;
+  if (boundKey === ' ' && e.key === 'Spacebar' && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) return true; // legacy browsers
   return false;
 }
 
 let capturingAction = null;
 document.addEventListener('keydown', (e) => {
   if (capturingAction) {
+    if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) { e.preventDefault(); return; } // keep waiting for the real key
     e.preventDefault();
     if (e.key !== 'Escape') {
       const action = capturingAction;
-      const dupe = KEYMAP_ACTIONS.find(a => a.id !== action && state.keymap[a.id] === e.key);
-      if (dupe) showToast('"' + formatKeyLabel(e.key) + '" was also bound to "' + dupe.label + '" — that one won\'t fire anymore');
-      state.keymap[action] = e.key;
+      const newKey = eventToKeyString(e);
+      const dupe = KEYMAP_ACTIONS.find(a => a.id !== action && state.keymap[a.id] === newKey);
+      if (dupe) showToast('"' + formatKeyLabel(newKey) + '" was also bound to "' + dupe.label + '" — that one won\'t fire anymore');
+      state.keymap[action] = newKey;
       saveSettings();
     }
     capturingAction = null;
@@ -1743,6 +1799,17 @@ document.addEventListener('keydown', (e) => {
   else if (matchesBinding(e, km.seekBack1)) { e.preventDefault(); seekBy(-1); }
   else if (matchesBinding(e, km.seekFwd1)) { e.preventDefault(); seekBy(1); }
   else if (matchesBinding(e, km.seekFwd5)) { e.preventDefault(); seekBy(5); }
+  else if (matchesBinding(e, km.editText)) {
+    e.preventDefault();
+    if (state.selectedLineId == null) { showToast('Select a line first'); return; }
+    state.editingLineId = state.selectedLineId;
+    renderLineList();
+  }
+  else if (matchesBinding(e, km.deleteLine)) {
+    e.preventDefault();
+    if (state.selectedLineId == null) { showToast('Select a line first'); return; }
+    deleteLine(state.selectedLineId);
+  }
 });
 
 /* =========================================================================
