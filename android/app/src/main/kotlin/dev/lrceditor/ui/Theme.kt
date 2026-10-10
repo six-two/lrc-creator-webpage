@@ -4,6 +4,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 
 object Studio {
     val Bg = Color(0xFF12151C)
@@ -31,3 +32,7 @@ private val scheme = darkColorScheme(
 
 @Composable
 fun LrcTheme(content: @Composable () -> Unit) = MaterialTheme(colorScheme = scheme, content = content)
+
+/** Short screens (e.g. the Unihertz Jelly Star) get tighter layouts. */
+@Composable
+fun isCompactScreen(): Boolean = LocalConfiguration.current.screenHeightDp < 700

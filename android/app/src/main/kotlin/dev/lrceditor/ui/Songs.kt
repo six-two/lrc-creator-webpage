@@ -28,6 +28,7 @@ import dev.lrceditor.core.LyricsState
 import dev.lrceditor.core.Search
 import dev.lrceditor.core.TagCount
 import dev.lrceditor.data.Recent
+import dev.lrceditor.data.Settings
 import dev.lrceditor.data.SongEntry
 import dev.lrceditor.data.SongsMode
 
@@ -47,8 +48,10 @@ fun SongsScreen(vm: EditorViewModel) {
     val unknownLyrics = remember(index) { index?.songs?.count { it.lyrics == LyricsState.UNKNOWN } ?: 0 }
     @Composable fun lyricsFilter() = LyricsFilterRow(prefs.lyrics, unknownLyrics) { f -> vm.updateSearch { it.copy(lyrics = f) } }
 
+    val compact = isCompactScreen()
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
-        Text("Songs", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(top = 8.dp))
+        Text("Songs", style = if (compact) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineSmall,
+            modifier = Modifier.padding(top = if (compact) 4.dp else 8.dp))
         Text(
             when {
                 scan.running -> if (scan.listing) "Looking for songs… ${scan.total} found" else "Indexing… ${scan.found} / ${scan.total}"
@@ -60,11 +63,12 @@ fun SongsScreen(vm: EditorViewModel) {
         )
         if (scan.running) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
 
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(vertical = if (compact) 4.dp else 8.dp)) {
             val modes = listOf(SongsMode.RECENT to "Recent", SongsMode.TITLE to "Song", SongsMode.FILENAME to "File", SongsMode.TAGS to "Tags")
             modes.forEachIndexed { i, (m, label) ->
+                // No check icon and a single-line label: otherwise "Recent" wraps on narrow screens and inflates the row.
                 SegmentedButton(prefs.mode == m, { vm.updateSearch { it.copy(mode = m) } },
-                    SegmentedButtonDefaults.itemShape(i, modes.size)) { Text(label) }
+                    SegmentedButtonDefaults.itemShape(i, modes.size), icon = {}) { Text(label, maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelLarge) }
             }
         }
 
@@ -91,7 +95,7 @@ fun SongsScreen(vm: EditorViewModel) {
                             onFuzzy = { z -> vm.updateSearch { it.copy(fuzzy = z) } })
                         lyricsFilter()
                     }
-                    resultItems(results, prefs.query.isNotBlank() || prefs.lyrics != LyricsFilter.ALL, vm)
+                    resultItems(results, prefs.query.isNotBlank() || prefs.lyrics != LyricsFilter.ALL, vm, settings.settings, prefs.lyrics)
                 }
                 SongsMode.FILENAME -> {
                     item {
@@ -100,7 +104,7 @@ fun SongsScreen(vm: EditorViewModel) {
                             onFuzzy = { z -> vm.updateSearch { it.copy(fuzzy = z) } })
                         lyricsFilter()
                     }
-                    resultItems(results, prefs.fileQuery.isNotBlank() || prefs.lyrics != LyricsFilter.ALL, vm)
+                    resultItems(results, prefs.fileQuery.isNotBlank() || prefs.lyrics != LyricsFilter.ALL, vm, settings.settings, prefs.lyrics)
                 }
                 SongsMode.TAGS -> {
                     item {
@@ -109,21 +113,21 @@ fun SongsScreen(vm: EditorViewModel) {
                         TagField("Exclude (none of)", prefs.exclude, tags) { t -> vm.updateSearch { it.copy(exclude = t) } }
                         lyricsFilter()
                     }
-                    resultItems(results, prefs.include.isNotEmpty() || prefs.exclude.isNotEmpty() || prefs.lyrics != LyricsFilter.ALL, vm)
+                    resultItems(results, prefs.include.isNotEmpty() || prefs.exclude.isNotEmpty() || prefs.lyrics != LyricsFilter.ALL, vm, settings.settings, prefs.lyrics)
                 }
             }
         }
     }
 }
 
-private fun LazyListScope.resultItems(results: List<SongEntry>, searched: Boolean, vm: EditorViewModel) {
+private fun LazyListScope.resultItems(results: List<SongEntry>, searched: Boolean, vm: EditorViewModel, settings: Settings, lyricsFilter: LyricsFilter) {
     item {
         Text(
             if (!searched) "" else "${results.size} result${if (results.size == 1) "" else "s"}",
             color = Studio.Dim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(vertical = 8.dp),
         )
     }
-    items(results, key = { it.uri }) { s -> SongRow(s) { vm.openSong(s.uri) } }
+    items(results, key = { it.uri }) { s -> SongRow(s, settings, lyricsFilter) { vm.openSong(s.uri) } }
 }
 
 /** Lyrics filter shared by every search page. */
@@ -201,20 +205,25 @@ private fun TagField(label: String, selected: List<String>, all: List<TagCount>,
 }
 
 @Composable
-private fun SongRow(s: SongEntry, onClick: () -> Unit) {
+private fun SongRow(s: SongEntry, cfg: Settings, filter: LyricsFilter, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 8.dp, horizontal = 4.dp)) {
         Text(s.displayTitle, maxLines = 2, overflow = TextOverflow.Ellipsis)
         val sub = listOf(s.artist, s.album).filter { it.isNotBlank() }.joinToString(" · ")
-        if (sub.isNotEmpty()) Text(sub, color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
-        if (s.tags.isNotEmpty()) Text(s.tags.joinToString(" · "), color = Studio.Teal, style = MaterialTheme.typography.labelSmall)
-        val lyrics = when (s.lyrics) {
-            LyricsState.SYNCED -> "Synced lyrics"
-            LyricsState.UNSYNCED -> "Unsynced lyrics"
-            LyricsState.NONE -> "No lyrics"
-            LyricsState.UNKNOWN -> null
+        if (cfg.showArtistAlbum && sub.isNotEmpty()) Text(sub, color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+        if (cfg.showTags && s.tags.isNotEmpty()) Text(s.tags.joinToString(" · "), color = Studio.Teal, style = MaterialTheme.typography.labelSmall)
+        // With a specific lyrics filter every row has the same state, so showing it would be noise.
+        if (cfg.showLyrics && (filter == LyricsFilter.ALL || filter == LyricsFilter.ANY)) {
+            val lyrics = when (s.lyrics) {
+                LyricsState.SYNCED -> "Synced lyrics"
+                LyricsState.UNSYNCED -> "Unsynced lyrics"
+                LyricsState.NONE -> "No lyrics"
+                LyricsState.UNKNOWN -> null
+            }
+            if (lyrics != null) Text(lyrics, color = Studio.Amber, style = MaterialTheme.typography.labelSmall)
         }
-        if (lyrics != null) Text(lyrics, color = Studio.Amber, style = MaterialTheme.typography.labelSmall)
-        Text(s.fileName, color = Studio.Faint, style = MaterialTheme.typography.labelSmall)
+        // Relative path replaces the bare file name; helps tell same-named files apart.
+        if (cfg.showPath) Text(s.relPath, color = Studio.Faint, style = MaterialTheme.typography.labelSmall)
+        else if (cfg.showFileName) Text(s.fileName, color = Studio.Faint, style = MaterialTheme.typography.labelSmall)
     }
     HorizontalDivider(color = Studio.Border.copy(alpha = 0.5f))
 }

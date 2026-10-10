@@ -11,7 +11,9 @@ import java.io.File
 data class SavedLine(val timeMs: Long?, val text: String)
 
 @Serializable
-data class SavedSession(val fileName: String, val lines: List<SavedLine>, val dirty: Boolean, val uri: String? = null)
+data class SavedSession(val fileName: String, val lines: List<SavedLine>, val dirty: Boolean, val uri: String? = null,
+    /** Lyrics as last loaded or saved; what "discard changes" goes back to. Null in sessions from older versions. */
+    val baseline: List<SavedLine>? = null)
 
 /**
  * Persists the working session in app-private storage: a copy of the MP3 (current.mp3) plus the lyric
@@ -24,8 +26,9 @@ class SessionStore(context: Context) {
     private val json = File(dir, "session.json")
     private val codec = Json { ignoreUnknownKeys = true }
 
-    fun save(fileName: String, lines: List<Line>, dirty: Boolean, uri: String?) {
-        val s = SavedSession(fileName, lines.map { SavedLine(it.timeMs, it.text) }, dirty, uri)
+    fun save(fileName: String, lines: List<Line>, dirty: Boolean, uri: String?, baseline: List<Line>?) {
+        val s = SavedSession(fileName, lines.map { SavedLine(it.timeMs, it.text) }, dirty, uri,
+            baseline?.map { SavedLine(it.timeMs, it.text) })
         val tmp = File(dir, "session.json.tmp")
         tmp.writeText(codec.encodeToString(SavedSession.serializer(), s))
         tmp.renameTo(json)

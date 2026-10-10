@@ -13,6 +13,13 @@ object Lrc {
     private val TIME_INPUT_RE = Regex("""^(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?$""")
     private val NEWLINE_RE = Regex("""\r\n|\r|\n""")
 
+    /** m:ss.t (tenths) for small screens, or -:--.- for null. */
+    fun formatTimeShort(ms: Long?): String {
+        if (ms == null) return "-:--.-"
+        val tenths = (maxOf(ms, 0L) + 50) / 100
+        return "%d:%02d.%d".format(tenths / 600, (tenths % 600) / 10, tenths % 10)
+    }
+
     /** mm:ss.xx (hundredths), or --:--.-- for null. */
     fun formatTime(ms: Long?): String {
         if (ms == null) return "--:--.--"

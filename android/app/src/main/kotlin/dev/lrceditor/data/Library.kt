@@ -1,13 +1,18 @@
 package dev.lrceditor.data
 
+import android.content.ContentProviderClient
 import android.content.Context
+import android.os.Bundle
 import android.net.Uri
 import android.provider.DocumentsContract
+import dev.lrceditor.core.DocPath
 import dev.lrceditor.core.Id3
+import dev.lrceditor.core.Ignore
 import dev.lrceditor.core.LyricsState
 import dev.lrceditor.core.Lrc
 import dev.lrceditor.core.Search
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -35,6 +40,8 @@ data class SongEntry(
     val lyrics: LyricsState = LyricsState.UNKNOWN,
 ) {
     val displayTitle get() = title.ifBlank { Lrc.baseName(fileName) }
+    /** Path below the music folder, e.g. `Artist/Album/Song.mp3` (derived from the document URI). */
+    val relPath get() = DocPath.relativePath(uri) ?: fileName
 }
 
 @Serializable
@@ -62,6 +69,19 @@ class LibraryRepository(private val context: Context) {
         return i.root != root || now - i.builtAt > MAX_AGE_MS
     }
 
+    /** Keeps the cached lyrics state of a song in sync after we saved lyrics into it. */
+    suspend fun setLyrics(uri: String, state: LyricsState) = withContext(Dispatchers.IO) {
+        val cur = _index.value ?: return@withContext
+        if (cur.songs.none { it.uri == uri }) return@withContext
+        val updated = cur.copy(songs = cur.songs.map { if (it.uri == uri) it.copy(lyrics = state) else it })
+        _index.value = updated
+        runCatching {
+            val tmp = File(file.path + ".tmp")
+            tmp.writeText(codec.encodeToString(LibraryIndex.serializer(), updated))
+            tmp.renameTo(file)
+        }
+    }
+
     fun clear() {
         _index.value = null
         file.delete()
@@ -69,14 +89,20 @@ class LibraryRepository(private val context: Context) {
 
     private class Child(val docId: String, val name: String, val mime: String, val size: Long, val modified: Long)
 
-    /** Walks the tree and (re)reads tags. Files whose size+modified time are unchanged reuse their old entry. */
-    /** [full] ignores the cached entries and re-reads every file's tags. */
-    suspend fun runScan(root: String, full: Boolean = false) {
+    /**
+     * Walks the tree and (re)reads tags. Files whose size+modified time are unchanged reuse their old entry;
+     * [full] ignores the cached entries and re-reads every file's tags. [ignoredFolders] / [ignoredFiles]
+     * are name patterns (see [Ignore]).
+     */
+    suspend fun runScan(
+        root: String, full: Boolean = false,
+        ignoredFolders: List<String> = emptyList(), ignoredFiles: List<String> = emptyList(),
+    ) {
         if (_scan.value.running) return
         _scan.value = ScanState(running = true, listing = true)
         val started = System.currentTimeMillis()
         try {
-            val songs = walk(Uri.parse(root), full)
+            val songs = walk(Uri.parse(root), full, Ignore.matcher(ignoredFolders), Ignore.matcher(ignoredFiles))
             val now = System.currentTimeMillis()
             val idx = LibraryIndex(root, now, songs, now - started)
             withContext(Dispatchers.IO) {
@@ -91,29 +117,19 @@ class LibraryRepository(private val context: Context) {
     }
 
     /**
-     * Phase 1 lists every directory (cheap, sequential). Phase 2 reads tags for new/changed files in parallel:
-     * each read is dominated by the cross-process open through the storage provider, not by CPU, so
-     * concurrency scales well.
+     * Phase 1 lists the directory tree; phase 2 reads tags for new/changed files. Both phases are dominated
+     * by cross-process calls into the storage provider (not CPU), so both run several requests in flight.
      */
-    private suspend fun walk(tree: Uri, full: Boolean): List<SongEntry> = coroutineScope {
+    private suspend fun walk(
+        tree: Uri, full: Boolean, ignoreDir: (String) -> Boolean, ignoreFile: (String) -> Boolean,
+    ): List<SongEntry> = coroutineScope {
         val resolver = context.contentResolver
         val old = if (full) emptyMap()
         else _index.value?.takeIf { it.root == tree.toString() }?.songs?.associateBy { it.uri }.orEmpty()
 
-        val files = withContext(Dispatchers.IO) {
-            val found = ArrayList<Pair<Child, Uri>>()
-            val stack = ArrayDeque<String>()
-            stack.add(DocumentsContract.getTreeDocumentId(tree))
-            while (stack.isNotEmpty()) {
-                for (c in children(tree, stack.removeLast())) {
-                    if (c.mime == DocumentsContract.Document.MIME_TYPE_DIR) { stack.add(c.docId); continue }
-                    if (!c.name.endsWith(".mp3", ignoreCase = true) && c.mime != "audio/mpeg") continue
-                    found += c to DocumentsContract.buildDocumentUriUsingTree(tree, c.docId)
-                    if (found.size % 50 == 0) _scan.value = ScanState(true, 0, found.size, listing = true)
-                }
-            }
-            found
-        }
+        val files = resolver.acquireContentProviderClient(tree)?.use { client ->
+            listFiles(client, tree, ignoreDir, ignoreFile)
+        } ?: error("Music folder provider is unavailable")
 
         val total = files.size
         val done = AtomicInteger()
@@ -136,7 +152,35 @@ class LibraryRepository(private val context: Context) {
         }.awaitAll()
     }
 
-    private fun children(tree: Uri, parentDocId: String): List<Child> {
+    /**
+     * Lists all MP3 files below [tree]. Sub-directories are listed concurrently (up to [LIST_PARALLELISM]
+     * queries at once) through one shared provider client, instead of one sequential query per directory.
+     */
+    private suspend fun listFiles(
+        client: ContentProviderClient, tree: Uri, ignoreDir: (String) -> Boolean, ignoreFile: (String) -> Boolean,
+    ): List<Pair<Child, Uri>> {
+        val gate = Semaphore(LIST_PARALLELISM)
+        val found = AtomicInteger()
+
+        suspend fun visit(docId: String): List<Pair<Child, Uri>> = coroutineScope {
+            val kids = gate.withPermit { withContext(Dispatchers.IO) { children(client, tree, docId) } }
+            val here = ArrayList<Pair<Child, Uri>>()
+            val subDirs = ArrayList<Deferred<List<Pair<Child, Uri>>>>()
+            for (c in kids) {
+                if (c.mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    if (!ignoreDir(c.name)) subDirs += async { visit(c.docId) }
+                } else if ((c.name.endsWith(".mp3", ignoreCase = true) || c.mime == "audio/mpeg") && !ignoreFile(c.name)) {
+                    here += c to DocumentsContract.buildDocumentUriUsingTree(tree, c.docId)
+                    val n = found.incrementAndGet()
+                    if (n % 50 == 0) _scan.value = ScanState(true, 0, n, listing = true)
+                }
+            }
+            here + subDirs.awaitAll().flatten()
+        }
+        return visit(DocumentsContract.getTreeDocumentId(tree))
+    }
+
+    private fun children(client: ContentProviderClient, tree: Uri, parentDocId: String): List<Child> {
         val uri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentDocId)
         val cols = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
@@ -144,7 +188,7 @@ class LibraryRepository(private val context: Context) {
             DocumentsContract.Document.COLUMN_LAST_MODIFIED,
         )
         val list = ArrayList<Child>()
-        context.contentResolver.query(uri, cols, null, null, null)?.use { c ->
+        client.query(uri, cols, Bundle.EMPTY, null)?.use { c ->
             while (c.moveToNext()) list += Child(c.getString(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getLong(3), c.getLong(4))
         }
         return list
@@ -152,6 +196,7 @@ class LibraryRepository(private val context: Context) {
 
     companion object {
         const val READ_PARALLELISM = 8
+        const val LIST_PARALLELISM = 8
         const val MAX_AGE_MS = 2L * 24 * 60 * 60 * 1000
     }
 }

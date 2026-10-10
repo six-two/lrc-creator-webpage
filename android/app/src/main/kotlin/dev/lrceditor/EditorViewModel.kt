@@ -6,6 +6,9 @@ import android.content.ClipboardManager
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
@@ -14,10 +17,12 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import dev.lrceditor.core.DocPath
 import dev.lrceditor.core.Id3
 import dev.lrceditor.core.Line
 import dev.lrceditor.core.Lrc
 import dev.lrceditor.core.LyricsFilter
+import dev.lrceditor.core.LyricsState
 import dev.lrceditor.core.NameField
 import dev.lrceditor.core.Search
 import dev.lrceditor.core.TagCount
@@ -29,6 +34,16 @@ enum class ExportKind { LRC, MP3 }
 
 enum class Tab { SONGS, EDITOR, SETTINGS }
 
+/** Technical details of the open MP3, shown by the info dialog. */
+data class FileInfo(
+    val fileName: String, val path: String?, val sizeBytes: Long,
+    val title: String, val artist: String, val album: String, val albumArtist: String,
+    val genre: String, val year: String, val track: String,
+    val tags: List<String>, val lyrics: LyricsState,
+    val bitrateKbps: Int?, val sampleRateHz: Int?, val durationMs: Long?, val id3Version: String?,
+    val cover: Bitmap?,
+)
+
 data class UiState(
     val loaded: Boolean = false,
     val fileName: String? = null,
@@ -38,6 +53,8 @@ data class UiState(
     val editingTextId: Long? = null,
     val editingTimeId: Long? = null,
     val dirty: Boolean = false,
+    val canUndo: Boolean = false,
+    val canRedo: Boolean = false,
     val isPlaying: Boolean = false,
     val speed: Float = 1f,
     val durationMs: Long = 0,
@@ -47,9 +64,22 @@ data class UiState(
     /** A file was shared in while unsaved work is open; waiting for the user to confirm replacing it. */
     val pendingOpen: Uri? = null,
     val busy: Boolean = false,
+    val confirmSave: Boolean = false,
+    val confirmDiscard: Boolean = false,
+    val info: FileInfo? = null,
 )
 
+private const val MAX_UNDO = 100
+
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
+    // Declared first: init blocks below restore a session, which resets these.
+    private val undoStack = ArrayDeque<List<Line>>()
+    private val redoStack = ArrayDeque<List<Line>>()
+    /** Lyrics as last loaded or saved/exported; "discard changes" returns to this. */
+    private var baseline: List<Line> = emptyList()
+    private var gestureOpen = false
+    private var gesturePushed = false
+
     private val sessions = SessionStore(app)
     private val settingsStore = SettingsStore(app)
     private val tick = TickPlayer()
@@ -93,6 +123,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private var currentUri: String? = null
 
+    private val _saveAs = MutableSharedFlow<ExportKind>(extraBufferCapacity = 1)
+    /** Asks the UI to open the system "save as" picker. */
+    val saveAs = _saveAs.asSharedFlow()
+
     private val _ui = MutableStateFlow(UiState())
     val ui = _ui.asStateFlow()
 
@@ -120,8 +154,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // Load the index, then refresh it in the background if it is stale.
         viewModelScope.launch {
             library.load()
-            val root = settingsStore.flow.first().libraryRoot ?: return@launch
-            if (library.isOutdated(root)) library.runScan(root)
+            val s = settingsStore.flow.first()
+            val root = s.libraryRoot ?: return@launch
+            if (library.isOutdated(root)) library.runScan(root, ignoredFolders = s.ignoredFolders, ignoredFiles = s.ignoredFiles)
         }
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -155,6 +190,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val (saved, lines) = sessions.load() ?: return
         currentUri = saved.uri
         activate(saved.fileName, lines, saved.dirty)
+        baseline = when {
+            saved.baseline != null -> saved.baseline.map { Lrc.newLine(it.timeMs, it.text) }
+            !saved.dirty -> lines
+            // Older session: fall back to the lyrics embedded in the copied MP3.
+            else -> runCatching { Id3.extractLines(Id3.parse(sessions.audioFile.readBytes())) }.getOrDefault(emptyList())
+        }
         _ui.update { it.copy(tab = Tab.EDITOR) }
         _messages.tryEmit("Session restored")
     }
@@ -201,6 +242,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val entry = library.index.value?.songs?.firstOrNull { it.uri == currentUri }
                 recentsStore.touch(Recent(currentUri!!, name, entry?.title.orEmpty(), entry?.artist.orEmpty(), System.currentTimeMillis()))
                 activate(name, lines, dirty = false)
+                baseline = lines
                 _ui.update { it.copy(tab = Tab.EDITOR) }
                 scheduleSave()
                 _messages.tryEmit(if (lines.isEmpty()) "No existing lyrics found — starting blank" else "Loaded existing lyrics from the file")
@@ -210,9 +252,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun activate(name: String, lines: List<Line>, dirty: Boolean) {
+        undoStack.clear(); redoStack.clear()
         _ui.update {
             it.copy(loaded = true, fileName = name, lines = lines, selectedId = lines.firstOrNull()?.id,
-                playingId = null, editingTextId = null, editingTimeId = null, dirty = dirty, speed = 1f)
+                playingId = null, editingTextId = null, editingTimeId = null, dirty = dirty, speed = 1f,
+                canUndo = false, canRedo = false)
         }
         player.setMediaItem(MediaItem.fromUri(Uri.fromFile(sessions.audioFile)))
         player.setPlaybackParameters(PlaybackParameters(1f))
@@ -222,9 +266,38 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------------------------------------------------------- line editing
 
+    /** A drag that changes lines many times (e.g. nudging) counts as a single undo step. */
+    fun beginGesture() { gestureOpen = true; gesturePushed = false }
+    fun endGesture() { gestureOpen = false }
+
     private fun mutateLines(markDirty: Boolean = true, f: (List<Line>) -> List<Line>) {
-        _ui.update { it.copy(lines = f(it.lines), dirty = it.dirty || markDirty) }
+        val before = _ui.value.lines
+        val after = f(before)
+        if (markDirty && !(gestureOpen && gesturePushed)) {
+            undoStack.addLast(before)
+            if (undoStack.size > MAX_UNDO) undoStack.removeFirst()
+            redoStack.clear()
+            gesturePushed = true
+        }
+        _ui.update { it.copy(lines = after, dirty = it.dirty || markDirty, canUndo = undoStack.isNotEmpty(), canRedo = redoStack.isNotEmpty()) }
         if (markDirty) scheduleSave()
+    }
+
+    fun undo() = restore(undoStack, redoStack)
+    fun redo() = restore(redoStack, undoStack)
+
+    private fun restore(from: ArrayDeque<List<Line>>, to: ArrayDeque<List<Line>>) {
+        val target = from.removeLastOrNull() ?: return
+        to.addLast(_ui.value.lines)
+        _ui.update {
+            it.copy(
+                lines = target, dirty = true, editingTextId = null, editingTimeId = null,
+                selectedId = it.selectedId.takeIf { id -> target.any { l -> l.id == id } } ?: target.firstOrNull()?.id,
+                playingId = it.playingId.takeIf { id -> target.any { l -> l.id == id } },
+                canUndo = undoStack.isNotEmpty(), canRedo = redoStack.isNotEmpty(),
+            )
+        }
+        scheduleSave()
     }
 
     private fun scheduleSave() {
@@ -238,7 +311,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun saveNow() = withContext(Dispatchers.IO) {
         val s = _ui.value
         if (s.loaded && s.fileName != null) {
-            runCatching { sessions.save(s.fileName, s.lines, s.dirty, currentUri) }
+            runCatching { sessions.save(s.fileName, s.lines, s.dirty, currentUri, baseline) }
             currentUri?.let { recentsStore.bump(it) }
         }
     }
@@ -331,6 +404,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun seekBy(deltaMs: Long) = seekTo(player.currentPosition + deltaMs)
 
     /** Seek to the line's time and play; also selects it. Selecting a row alone never moves playback. */
+    /** Tapping a line selects it and, if it has a time, plays from there. Untimed lines are only selected. */
+    fun tapLine(id: Long) {
+        select(id)
+        if (_ui.value.lines.firstOrNull { it.id == id }?.timeMs != null) playFromLine(id)
+    }
+
     fun playFromLine(id: Long) {
         val line = _ui.value.lines.firstOrNull { it.id == id } ?: return
         val t = line.timeMs ?: return run { _messages.tryEmit("This line has no time set yet") }
@@ -383,10 +462,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setLibraryRoot(uri: Uri) {
         val resolver = getApplication<Application>().contentResolver
-        runCatching { resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        runCatching { resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         val old = _ui.value.settings.libraryRoot
         if (old != null && old != uri.toString()) {
-            runCatching { resolver.releasePersistableUriPermission(Uri.parse(old), Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            runCatching { resolver.releasePersistableUriPermission(Uri.parse(old), Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         }
         updateSettings(_ui.value.settings.copy(libraryRoot = uri.toString()))
         rescan()
@@ -396,7 +475,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val root = _ui.value.settings.libraryRoot ?: return run { _messages.tryEmit("Choose a music folder first") }
         viewModelScope.launch {
             if (library.scan.value.running) return@launch
-            runCatching { library.runScan(root, full) }
+            runCatching { library.runScan(root, full, _ui.value.settings.ignoredFolders, _ui.value.settings.ignoredFiles) }
                 .onSuccess { _messages.tryEmit("Library indexed: ${library.index.value?.songs?.size ?: 0} songs") }
                 .onFailure { _messages.tryEmit("Scan failed: ${it.message}") }
         }
@@ -408,12 +487,115 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun removeRecent(uri: String) = recentsStore.remove(uri)
 
+    // ---------------------------------------------------------------- file info
+
+    fun showInfo() {
+        val name = _ui.value.fileName ?: return
+        val uri = currentUri
+        viewModelScope.launch {
+            val info = withContext(Dispatchers.IO) { runCatching { readFileInfo(name, uri) }.getOrNull() }
+            if (info == null) _messages.tryEmit("Could not read file info") else _ui.update { it.copy(info = info) }
+        }
+    }
+
+    fun closeInfo() = _ui.update { it.copy(info = null) }
+
+    private fun readFileInfo(name: String, uri: String?): FileInfo {
+        val file = sessions.audioFile
+        val meta = file.inputStream().use { Id3.readMeta(it) }
+        val version = file.inputStream().use { ins ->
+            val h = ByteArray(4)
+            if (ins.read(h) == 4 && h[0] == 'I'.code.toByte() && h[1] == 'D'.code.toByte() && h[2] == '3'.code.toByte()) "ID3v2.${h[3]}" else null
+        }
+        val mmr = MediaMetadataRetriever()
+        try {
+            mmr.setDataSource(file.path)
+            fun k(key: Int) = mmr.extractMetadata(key).orEmpty()
+            val cover = mmr.embeddedPicture?.let { decodeSampled(it, 1024) }
+            return FileInfo(
+                fileName = name, path = uri?.let { DocPath.fullPath(it) ?: it }, sizeBytes = file.length(),
+                title = meta.title.ifBlank { k(MediaMetadataRetriever.METADATA_KEY_TITLE) },
+                artist = meta.artist.ifBlank { k(MediaMetadataRetriever.METADATA_KEY_ARTIST) },
+                album = meta.album.ifBlank { k(MediaMetadataRetriever.METADATA_KEY_ALBUM) },
+                albumArtist = k(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST),
+                genre = k(MediaMetadataRetriever.METADATA_KEY_GENRE),
+                year = k(MediaMetadataRetriever.METADATA_KEY_YEAR).ifBlank { k(MediaMetadataRetriever.METADATA_KEY_DATE) },
+                track = k(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER),
+                tags = Search.parseTags(meta.grouping), lyrics = meta.lyrics,
+                bitrateKbps = k(MediaMetadataRetriever.METADATA_KEY_BITRATE).toIntOrNull()?.let { it / 1000 },
+                sampleRateHz = k(MediaMetadataRetriever.METADATA_KEY_SAMPLERATE).toIntOrNull(),
+                durationMs = k(MediaMetadataRetriever.METADATA_KEY_DURATION).toLongOrNull(),
+                id3Version = version, cover = cover,
+            )
+        } finally {
+            mmr.release()
+        }
+    }
+
+    private fun decodeSampled(bytes: ByteArray, maxSide: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (bounds.outWidth / sample > maxSide || bounds.outHeight / sample > maxSide) sample *= 2
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+    }
+
     // ---------------------------------------------------------------- export
 
-    fun export(action: ExportAction): ExportKind? = when (action) {
-        ExportAction.DOWNLOAD_LRC -> ExportKind.LRC
-        ExportAction.EMBED_MP3 -> ExportKind.MP3
-        ExportAction.COPY_LRC -> { copyLrc(); null }
+    /** Save button: embeds the lyrics into the original MP3 (after asking, if enabled). */
+    fun requestSave() {
+        if (!_ui.value.loaded) return
+        if (_ui.value.settings.confirmOverwrite) _ui.update { it.copy(confirmSave = true) } else saveToOriginal()
+    }
+
+    fun requestDiscard() = _ui.update { it.copy(confirmDiscard = true) }
+    fun dismissDiscard() = _ui.update { it.copy(confirmDiscard = false) }
+
+    /** Goes back to the lyrics as last loaded or saved. Undo can bring the discarded changes back. */
+    fun confirmDiscard() {
+        dismissDiscard()
+        val restored = baseline.map { Lrc.newLine(it.timeMs, it.text) }
+        mutateLines { restored }
+        _ui.update {
+            it.copy(dirty = false, editingTextId = null, editingTimeId = null, playingId = null,
+                selectedId = restored.firstOrNull()?.id)
+        }
+        scheduleSave()
+        _messages.tryEmit("Changes discarded")
+    }
+
+    fun dismissSaveConfirm() = _ui.update { it.copy(confirmSave = false) }
+
+    fun confirmSave() {
+        dismissSaveConfirm()
+        saveToOriginal()
+    }
+
+    /** Writes straight into the original file. Falls back to the "save as" picker if we have no write access. */
+    private fun saveToOriginal() {
+        val uriString = currentUri ?: return run { _saveAs.tryEmit(ExportKind.MP3) }
+        val uri = Uri.parse(uriString)
+        val text = currentLrc()
+        val note = exportNote()
+        val state = if (_ui.value.lines.any { it.text.isNotBlank() }) LyricsState.SYNCED else LyricsState.NONE
+        viewModelScope.launch {
+            val r = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bytes = Id3.embedLyrics(sessions.audioFile.readBytes(), text)
+                    val out = getApplication<Application>().contentResolver.openOutputStream(uri, "wt") ?: error("no output stream")
+                    out.use { it.write(bytes) }
+                }
+            }
+            r.onSuccess {
+                markClean()
+                library.setLyrics(uriString, state)
+                _messages.tryEmit("Saved lyrics into ${_ui.value.fileName}$note")
+            }
+            r.onFailure {
+                _messages.tryEmit("Can't write to the original file (${it.javaClass.simpleName}) — choose where to save instead")
+                _saveAs.tryEmit(ExportKind.MP3)
+            }
+        }
     }
 
     fun suggestedName(kind: ExportKind): String {
@@ -427,11 +609,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun markClean() {
+        baseline = _ui.value.lines
         _ui.update { it.copy(dirty = false) }
         scheduleSave()
     }
 
-    private fun copyLrc() {
+    fun copyLrc() {
         val cm = getApplication<Application>().getSystemService(ClipboardManager::class.java)
         cm.setPrimaryClip(ClipData.newPlainText("lrc", currentLrc()))
         markClean()

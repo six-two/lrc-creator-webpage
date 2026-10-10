@@ -18,6 +18,13 @@ class CoreTest {
         assertEquals("[00:05.00]a\n[00:05.00]b", Lrc.serialize(lines))
     }
 
+    @Test fun shortTimeFormat() {
+        assertEquals("0:00.0", Lrc.formatTimeShort(0))
+        assertEquals("1:23.5", Lrc.formatTimeShort(83450))
+        assertEquals("12:05.0", Lrc.formatTimeShort(725_000))
+        assertEquals("-:--.-", Lrc.formatTimeShort(null))
+    }
+
     @Test fun timeInput() {
         assertEquals(Lrc.TimeInput.Ok(83450), Lrc.parseTimeInput("01:23.45"))
         assertEquals(Lrc.TimeInput.Ok(83000), Lrc.parseTimeInput("1:23"))
@@ -97,5 +104,27 @@ class LyricsDetectTest {
         assertFalse(LyricsFilter.ANY.matches(LyricsState.NONE))
         assertFalse(LyricsFilter.NONE.matches(LyricsState.UNKNOWN))
         assertTrue(LyricsFilter.ALL.matches(LyricsState.UNKNOWN))
+    }
+}
+
+class IgnoreTest {
+    @Test fun defaultsAndWildcards() {
+        val m = Ignore.matcher(Ignore.DEFAULTS)
+        listOf(".stfolder", ".STVERSIONS", ".debris", ".Trash-1000", ".trashed-1700000-x", "\$RECYCLE.BIN", "@eaDir").forEach { assertTrue(it, m(it)) }
+        listOf("Music", "stfolder", "My .debris stash", "Anime").forEach { assertFalse(it, m(it)) }
+        assertTrue(Ignore.matcher(listOf("Podcasts*"))("podcasts old"))
+        val files = Ignore.matcher(Ignore.DEFAULT_FILES)
+        assertTrue(files("Song.sync-conflict-20250101-120000-ABCDEFG.mp3"))
+        assertFalse(files("Song.mp3"))
+    }
+}
+
+class DocPathTest {
+    @Test fun relativePath() {
+        val uri = "content://com.android.externalstorage.documents/tree/primary%3AMusic%2Fsyncthing/document/primary%3AMusic%2Fsyncthing%2Fcovers%20misc%2FKit%20-%20Song%20(v2)%2B.mp3"
+        assertEquals("covers misc/Kit - Song (v2)+.mp3", DocPath.relativePath(uri))
+        assertEquals("日本語/曲.mp3", DocPath.relativePath("content://a/tree/p%3AM/document/p%3AM%2F%E6%97%A5%E6%9C%AC%E8%AA%9E%2F%E6%9B%B2.mp3"))
+        assertNull(DocPath.relativePath("content://a/document/p%3AM%2Fx.mp3"))
+        assertEquals("/storage/emulated/0/Music/a b/x.mp3", DocPath.fullPath("content://a/tree/primary%3AMusic/document/primary%3AMusic%2Fa%20b%2Fx.mp3"))
     }
 }
