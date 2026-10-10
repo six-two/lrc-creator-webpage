@@ -1,0 +1,6 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- amber play triangle on the safe zone -->
+    <path android:fillColor="#E8A33D" android:pathData="M43,34 L43,74 L77,54 Z" />
+</vector>
