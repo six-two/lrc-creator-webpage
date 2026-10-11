@@ -13,6 +13,8 @@ object Lrc {
     private val TIME_INPUT_RE = Regex("""^([0-9]{1,3}):([0-9]{1,2})(?:[.:]([0-9]{1,3}))?$""")
     /** ID tag lines like [ar:Artist], [al: Album], [offset:0], [ti:Song [english ver.]] (brackets may be nested): not lyrics, and not timestamps (those start with digits). */
     val METADATA_RE = Regex("""^\s*\[[A-Za-z]{1,12}\s*:.*]\s*$""")
+    /** The ID tags that identify a song (a second copy repeats them). Others, like [offset:0], can sit anywhere. Used where a false positive matters, since lyrics can contain things like [Chorus: Drake]. */
+    private val KNOWN_META_RE = Regex("""^\s*\[(ti|ar|al|au|by)\s*:.*]\s*$""", RegexOption.IGNORE_CASE)
     private val NEWLINE_RE = Regex("""\r\n|\r|\n""")
 
     /** m:ss.t (tenths) for small screens, or -:--.- for null. */
@@ -59,6 +61,43 @@ object Lrc {
 
     /** Timestamp-looking tags written with non-ASCII digits (e.g. 𝟶𝟹:𝟶𝟸). They are not timestamps here; they stay as plain text. */
     fun hasOddTimestamps(text: String) = LOOKALIKE_RE.findAll(text).any { m -> m.value.any { it.code > 127 } || m.value.codePoints().anyMatch { it > 127 } }
+
+    /**
+     * Line index of an identifying ID tag ([ar:..], [ti:..]) in the middle of the lyrics: after a timed lyric line and followed
+     * by another one, which is what a second LRC pasted below the first looks like. Other tags ([offset:0], [length:..]) are
+     * skipped over, and so is a lone tag at the end of the file (a credit line), which many LRCs have.
+     */
+    private fun midMetadataAt(raw: List<String>): Int? {
+        var seenLyric = false
+        var tagAt: Int? = null
+        for ((i, line) in raw.withIndex()) {
+            when {
+                line.isBlank() -> {}
+                KNOWN_META_RE.matches(line) -> if (seenLyric && tagAt == null) tagAt = i
+                METADATA_RE.matches(line) -> {}
+                TAG_RE.containsMatchIn(line) && TAG_RE.replace(line, "").isNotBlank() -> { if (tagAt != null) return tagAt; seenLyric = true }
+            }
+        }
+        return null
+    }
+
+    fun hasMetadataInMiddle(text: String): Boolean = secondCopyStart(text) != null
+
+    /**
+     * Number of entries before the middle ID tag that starts a second copy (see [midMetadataAt]), or null if there is none.
+     * A second block with (nearly) the same times as the first is not a second sync but the same lyrics with a translation or
+     * romanization after each line, so it doesn't count.
+     */
+    fun secondCopyStart(text: String): Int? {
+        val raw = text.split(NEWLINE_RE)
+        val at = midMetadataAt(raw) ?: return null
+        val first = parse(raw.take(at).joinToString("\n"))
+        if (first.isEmpty()) return null
+        val firstTimes = first.mapNotNull { it.timeMs }.toSet()
+        val second = parse(raw.drop(at).joinToString("\n")).mapNotNull { it.timeMs }
+        if (second.isNotEmpty() && second.count { it in firstTimes } * 10 >= second.size * 8) return null
+        return first.size
+    }
 
     fun looksLikeLrc(text: String) = TAG_RE.containsMatchIn(text)
 

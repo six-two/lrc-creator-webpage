@@ -12,6 +12,8 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -100,9 +102,14 @@ data class UiState(
     /** Lyrics of the open file that exist but can't be read, shown raw for fixing; saving is blocked meanwhile. */
     val rawLyrics: String? = null,
     val lyricsError: String? = null,
+    /** The app has only read access to the music folder; a popup asks to choose it again. */
+    val folderReadOnly: Boolean = false,
 ) {
     val learn get() = Search.learnStateOf(tags)
 }
+
+/** The two lyrics of a song that contains both, shown side by side for choosing one. */
+data class Compare(val first: List<Line>, val second: List<Line>)
 
 private const val MAX_UNDO = 100
 
@@ -123,10 +130,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val library = LibraryRepository(app)
     private val recentsStore = RecentsStore(app)
     private val searchStore = SearchPrefsStore(app)
+    private val flagStore = FlagStore(app)
 
     val recents: StateFlow<List<Recent>> = recentsStore.items
+    /** Songs marked by hand as having broken lyrics. */
+    val brokenLyrics: StateFlow<Set<String>> = flagStore.uris
     val scan: StateFlow<ScanState> = library.scan
     val index: StateFlow<LibraryIndex?> = library.index
+
+    private val _compare = MutableStateFlow<Compare?>(null)
+    val compare = _compare.asStateFlow()
+    /** The line where a second copy of the lyrics starts, found from its metadata when the file was loaded. */
+    private var doubleHintId: Long? = null
 
     private val _search = MutableStateFlow(SearchPrefs())
     val search = _search.asStateFlow()
@@ -177,6 +192,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     val player: ExoPlayer = ExoPlayer.Builder(app)
         .setMediaSourceFactory(
             DefaultMediaSourceFactory(app, DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true))
+        )
+        // Takes audio focus while playing, so other music and podcasts pause (and resume-able apps can pick up afterwards).
+        .setAudioAttributes(
+            AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(),
+            /* handleAudioFocus = */ true,
         ).build()
 
     private var saveJob: Job? = null
@@ -188,12 +208,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             _search.value = searchStore.load()
             _search.drop(1).debounce(400).collect { searchStore.save(it) }
         }
-        // Load the index, then refresh it in the background if it is stale.
+        // Load the index, then refresh it in the background if it is stale or from another data version.
         viewModelScope.launch {
-            library.load()
+            val rebuild = library.load()
             val s = settingsStore.flow.first()
             val root = s.libraryRoot ?: return@launch
-            if (library.isOutdated(root)) library.runScan(root, ignoredFolders = s.ignoredFolders, ignoredFiles = s.ignoredFiles)
+            checkFolderAccess(root)
+            if (rebuild) {
+                _messages.tryEmit("Library data changed: rescanning all songs in the background…")
+                runCatching { library.runScan(root, full = true, ignoredFolders = s.ignoredFolders, ignoredFiles = s.ignoredFiles) }
+                    .onSuccess { _messages.tryEmit("Library rescan finished: ${library.index.value?.songs?.size ?: 0} songs") }
+                    .onFailure { _messages.tryEmit("Library rescan failed: ${it.message}") }
+            } else if (library.isOutdated(root)) library.runScan(root, ignoredFolders = s.ignoredFolders, ignoredFiles = s.ignoredFiles)
         }
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -269,6 +295,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun loadUri(uri: Uri) {
         viewModelScope.launch {
             _ui.update { it.copy(busy = true) }
+            var hintIndex: Int? = null
             val result = withContext(Dispatchers.IO) {
                 runCatching<Triple<String, List<Line>, Pair<String, String>?>?> {
                     val resolver = getApplication<Application>().contentResolver
@@ -279,6 +306,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (!Lrc.looksLikeMp3(bytes)) return@runCatching null
                     sessions.audioFile.writeBytes(bytes)
                     val bad = unreadableLyrics(bytes)
+                    if (bad == null) hintIndex = runCatching {
+                        val parsed = Id3.parse(bytes)
+                        if (parsed.frames.any { it.id == "SYLT" }) null else Id3.rawLyricsText(parsed)?.let(Lrc::secondCopyStart)
+                    }.getOrNull()
                     Triple(name, if (bad != null) emptyList() else Id3.extractLines(Id3.parse(bytes)), bad)
                 }
             }
@@ -295,6 +326,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 recentsStore.touch(Recent(currentUri!!, name, entry?.title.orEmpty(), entry?.artist.orEmpty(), System.currentTimeMillis()))
                 activate(name, lines, dirty = false)
                 baseline = lines
+                doubleHintId = hintIndex?.let { lines.getOrNull(it)?.id }
                 // A song with a problem opens on the first problem line.
                 Issues.nextProblemLine(lines, null)?.let { id -> _ui.update { it.copy(selectedId = id, scrollToId = id) } }
                 navigate(Tab.EDITOR)
@@ -311,6 +343,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun activate(name: String, lines: List<Line>, dirty: Boolean) {
         undoStack.clear(); redoStack.clear()
+        _compare.value = null
         _ui.update {
             it.copy(loaded = true, fileName = name, lines = lines, selectedId = lines.firstOrNull()?.id,
                 playingId = null, editingTextId = null, editingTimeId = null, dirty = dirty, speed = 1f,
@@ -467,6 +500,35 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    // ---------------------------------------------------------------- two lyrics in one
+
+    /** The two lyrics if the open song contains both (see [Issues.splitDouble]). */
+    fun doubleLyrics(lines: List<Line>): Compare? = Issues.splitDouble(lines, doubleHintId)?.let { (a, b) -> Compare(a, b) }
+
+    fun openCompare() {
+        _compare.value = doubleLyrics(_ui.value.lines) ?: return run { _messages.tryEmit("Couldn't find two separate lyrics") }
+    }
+
+    fun closeCompare() { _compare.value = null }
+
+    /** Keeps only [first] or [second] as the song's lyrics (one undo step, nothing is written to the file until saving). */
+    fun chooseCompare(keepFirst: Boolean) {
+        val c = _compare.value ?: return
+        val keep = if (keepFirst) c.first else c.second
+        _compare.value = null
+        _ui.update { it.copy(selectedId = keep.firstOrNull()?.id, playingId = null, editingTextId = null, editingTimeId = null) }
+        mutateLines { keep }
+        doubleHintId = null
+        _messages.tryEmit("Kept the ${if (keepFirst) "first" else "second"} lyrics. Undo brings the other back.")
+    }
+
+    /** Plays from the time of a line of the compare view; the lines of both sides follow the same position. */
+    fun playCompareLine(line: Line) {
+        val t = line.timeMs ?: return
+        seekTo(t)
+        player.play()
+    }
+
     fun currentLrc(): String = Lrc.serialize(_ui.value.lines)
 
     // ---------------------------------------------------------------- player
@@ -569,7 +631,29 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             runCatching { resolver.releasePersistableUriPermission(old.toUri(), Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         }
         updateSettings(_ui.value.settings.copy(libraryRoot = uri.toString()))
+        checkFolderAccess(uri.toString())
         rescan()
+    }
+
+    /** Opens the "read-only folder" popup if the app can only read the music folder (saving into songs would fail). */
+    private fun checkFolderAccess(root: String) {
+        if (!hasWriteAccess(root.toUri())) _ui.update { it.copy(folderReadOnly = true) }
+    }
+
+    fun dismissFolderReadOnly() = _ui.update { it.copy(folderReadOnly = false) }
+
+    private fun hasWriteAccess(tree: Uri) =
+        getApplication<Application>().contentResolver.persistedUriPermissions.any { it.uri == tree && it.isWritePermission }
+
+    /** Writes the problems found in the library to the app's folder on shared storage, where `adb pull` can read them. */
+    fun exportDebugLog() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val version = runCatching { app.packageManager.getPackageInfo(app.packageName, 0).versionName }.getOrNull().orEmpty()
+            val file = runCatching { library.exportDebugLog(app.getExternalFilesDir(null) ?: app.filesDir, version) }
+            file.onFailure { _messages.tryEmit("Could not write the debug log: ${it.message}") }
+            file.onSuccess { _messages.tryEmit(if (it == null) "Nothing to export: the library is not indexed yet" else "Debug log written to ${it.absolutePath}") }
+        }
     }
 
     fun rescan(full: Boolean = false) {
@@ -591,6 +675,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun openSong(uriString: String) = openUri(uriString.toUri())
 
     fun currentUriString(): String? = currentUri
+
+    /** Marks the open song as having broken lyrics (shown in the Fix list), or removes the mark. */
+    fun toggleBrokenLyrics() {
+        val uri = currentUri
+        if (uri == null) { _messages.tryEmit("Open a song from your library first"); return }
+        _messages.tryEmit(if (flagStore.toggle(uri)) "Marked as broken. It is now in the Fix list." else "Mark removed")
+    }
 
     fun removeRecent(uri: String) = recentsStore.remove(uri)
 

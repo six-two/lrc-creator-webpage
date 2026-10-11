@@ -317,6 +317,109 @@ class IssuesTest {
         assertFalse(Issue.OUT_OF_ORDER in check("Lyrics", "[00:05.00]a\n[00:00.00]b\n[00:06.00]c"))
     }
 
+    @Test fun doubleLyricsDetected() {
+        val a = "[00:10.00]a\n[00:20.00]b\n[00:30.00]c\n[00:40.00]d"
+        // metadata in the middle
+        assertTrue(Issue.DOUBLE_LYRICS in check("Lyrics; Karaoke", "[ar:X]\n$a\n[ar:X]\n[00:11.00]a\n[00:21.00]b"))
+        assertFalse(Issue.DOUBLE_LYRICS in check("Lyrics; Karaoke", "[ar:X]\n[ti:Y]\n\n$a"))
+        assertFalse(Issue.DOUBLE_LYRICS in check("Lyrics; Karaoke", "$a\n[Chorus: Drake]"))
+        // two ascending runs, second one slightly shifted
+        assertTrue(Issue.DOUBLE_RUNS in check("Lyrics; Karaoke", "$a\n[00:12.00]a\n[00:22.00]b\n[00:32.00]c\n[00:43.00]d"))
+        // one misplaced line is plain out of order
+        val glitch = "[00:01.00]a\n[00:02.00]b\n[00:03.00]c\n[00:04.00]d\n[00:05.00]e\n[05:00.00]f\n[00:07.00]g\n[00:08.00]h\n[00:09.00]i"
+        assertEquals(setOf(Issue.OUT_OF_ORDER), check("Lyrics; Karaoke", glitch))
+        assertEquals(setOf(Issue.OUT_OF_ORDER), check("Lyrics; Karaoke", "[00:05.00]a\n[00:02.00]b"))
+    }
+
+    private fun doubles(lyrics: String) = check("Lyrics; Karaoke", lyrics).filter { it == Issue.DOUBLE_LYRICS || it == Issue.DOUBLE_RUNS }
+
+    @Test fun normalHeadersAndTrailersAreNotDoubleLyrics() {
+        val body = "[00:10.00]one\n[00:20.00]two\n[00:30.00]three\n[00:40.00]four"
+        // other tags in any order before the lyrics
+        assertEquals(emptyList<Issue>(), doubles("[ti:T]\n[offset:0]\n[ar:A]\n[length:03:20]\n[al:B]\n[by:C]\n[re:tool]\n[ve:1]\n[ar:A]\n$body"))
+        // credits at the end of the file
+        assertEquals(emptyList<Issue>(), doubles("[ti:T]\n$body\n[by:someone]"))
+        assertEquals(emptyList<Issue>(), doubles("$body\n[ar:A]\n[ti:T]\n"))
+        // plain text before the header, CRLF line ends, blank lines
+        assertEquals(emptyList<Issue>(), doubles("Karaoke version\r\n\r\n[ar:A]\r\n$body"))
+        // a tag between lyrics that is not an identifying one
+        assertEquals(emptyList<Issue>(), doubles("[00:05.00]zero\n[offset:0]\n$body"))
+        // a timed line with no text doesn't count as lyrics
+        assertEquals(emptyList<Issue>(), doubles("[00:00.00]\n[ar:A]\n$body"))
+        assertEquals(emptyList<Issue>(), doubles("[00:01.00]\n[ar:A]\n[00:02.00]\n$body"))
+    }
+
+    @Test fun translationBlockWithTheSameTimesIsNotDoubleLyrics() {
+        val head = "[ti:T]\n[ar:A]\n[offset:+0]\n[by:Tool]\n"
+        val jp = "[00:05.00]jp1\nromaji1\n[00:10.00]jp2\nromaji2\n[00:15.00]jp3\nromaji3"
+        val cn = "[by:translator]\n[00:05.00]cn1\nromaji1\n[00:10.00]cn2\nromaji2\n[00:15.00]cn3\nromaji3"
+        // the first line has several timestamps, so everything is sorted by time and the pairs end up next to each other
+        val sorted = "$head[00:01.00][00:20.00]\n$jp\n\n$cn"
+        assertEquals(setOf(Issue.SAME_TIME), check("Lyrics; Karaoke", sorted))
+        assertNull(Lrc.secondCopyStart(sorted))
+        // without that, the second block just follows the first
+        val plain = "$head$jp\n\n$cn"
+        assertEquals(emptyList<Issue>(), doubles(plain))
+        assertTrue(Issue.OUT_OF_ORDER in check("Lyrics; Karaoke", plain))
+        // a translation that skips a line still has the same times
+        assertNull(Lrc.secondCopyStart("$head$jp\n[by:x]\n[00:05.00]cn1\n[00:10.00]cn2"))
+        // but a second block with other times is a second sync
+        assertEquals(listOf(Issue.DOUBLE_LYRICS), doubles("$head$jp\n[by:x]\n[00:06.00]cn1\n[00:11.50]cn2\n[00:16.00]cn3"))
+    }
+
+    @Test fun repeatedChorusWithAscendingTimesIsNotDoubleLyrics() {
+        val song = (0 until 30).joinToString("\n") { i -> "[%02d:%02d.00]%s".format(i / 6, (i % 6) * 10, if (i % 5 == 0) "chorus line" else "line $i") }
+        assertEquals(emptyList<Issue>(), doubles(song))
+        // every line has its own timestamp, even many at the same time
+        assertEquals(emptyList<Issue>(), doubles((0 until 20).joinToString("\n") { "[00:%02d.00]w$it".format(it / 2) }))
+    }
+
+    @Test fun duetWithOneSingerAfterTheOtherIsOnlyOutOfOrder() {
+        val a = "[00:10.00]I walk alone\n[00:20.00]down the road\n[00:30.00]nobody knows\n[00:40.00]where I go"
+        val b = "[00:12.00]you wait at home\n[00:22.00]by the door\n[00:32.00]counting stars\n[00:42.00]once more"
+        assertEquals(setOf(Issue.OUT_OF_ORDER), check("Lyrics; Karaoke", "$a\n$b"))
+    }
+
+    @Test fun singleOrderGlitchesAreNotDoubleLyrics() {
+        assertEquals(emptyList<Issue>(), doubles("[00:10.00]a\n[00:20.00]b\n[00:30.00]c\n[00:05.00]d\n[00:40.00]e"))
+        assertEquals(emptyList<Issue>(), doubles("[00:10.00]a\n[00:20.00]b\n[00:30.00]c\n[00:05.00]a\n[00:06.00]b\n[00:07.00]c"))
+        assertEquals(emptyList<Issue>(), doubles(""))
+        assertEquals(emptyList<Issue>(), doubles("[00:10.00]only"))
+    }
+
+    @Test fun reportsWhichKindOfDoubleLyrics() {
+        val a = "[00:10.00]a\n[00:20.00]b\n[00:30.00]c\n[00:40.00]d"
+        assertEquals(listOf(Issue.DOUBLE_LYRICS), doubles("[ar:X]\n$a\n[ar:X]\n[00:11.00]a\n[00:21.00]b"))
+        assertEquals(listOf(Issue.DOUBLE_RUNS), doubles("$a\n[00:12.00]a\n[00:22.00]b\n[00:32.00]c\n[00:43.00]d"))
+        // a second copy that is a translation (different text) is not detected by the times alone
+        assertEquals(emptyList<Issue>(), doubles("$a\n[00:12.00]x\n[00:22.00]y\n[00:32.00]z\n[00:43.00]w"))
+    }
+
+    @Test fun splitsTwoLyrics() {
+        val a = Lrc.parse("[00:10.00]a\n[00:20.00]b\n[00:30.00]c\n[00:40.00]d")
+        val b = Lrc.parse("[00:12.00]a\n[00:22.00]b\n[00:32.00]c\n[00:43.00]d")
+        val (first, second) = Issues.splitDouble(a + b, null)!!
+        assertEquals(a, first)
+        assertEquals(b, second)
+        assertNull(Issues.splitDouble(a, null))
+        // metadata marks where the second one starts, even when the times don't drop back
+        val text = "[ar:X]\n[00:10.00]a\n[00:20.00]b\n[ar:X]\n[00:30.00]c\n[00:40.00]d"
+        assertEquals(2, Lrc.secondCopyStart(text))
+        val lines = Lrc.parse(text)
+        val (x, y) = Issues.splitDouble(lines, lines[2].id)!!
+        assertEquals(listOf("a", "b"), x.map { it.text })
+        assertEquals(listOf("c", "d"), y.map { it.text })
+        assertNull(Lrc.secondCopyStart("[ar:X]\n[00:10.00]a"))
+    }
+
+    @Test fun sameTimeTwiceIsAWarning() {
+        assertTrue(Issue.SAME_TIME.warning)
+        assertEquals(setOf(Issue.SAME_TIME), check("Lyrics; Karaoke", "[00:05.00]a\n[00:05.00]b\n[00:06.00]c"))
+        assertFalse(Issue.SAME_TIME in check("Lyrics; Karaoke", "[00:05.00]a\n[00:06.00]b\n[00:05.00]c"))
+        val lines = listOf(Line(1, 5000, "a"), Line(2, 5000, "b"))
+        assertEquals(listOf(2L to LineProblem.SAME_TIME), Issues.lineProblems(lines))
+    }
+
     @Test fun conflictingAndSylt() {
         assertEquals(setOf(Issue.CONFLICTING_LEARN_TAGS), check("Learn; unsingable", null))
         assertEquals(setOf(Issue.SYLT_ONLY), check("", null, sylt = true))

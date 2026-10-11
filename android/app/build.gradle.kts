@@ -12,8 +12,8 @@ android {
         applicationId = "dev.lrceditor"
         minSdk = 34
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.0.3"
+        versionCode = 4
+        versionName = "0.0.4"
     }
 
     // Optional local dev key so installs from different machines can update each other. Set in

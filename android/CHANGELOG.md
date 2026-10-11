@@ -2,6 +2,19 @@
 
 High-level, human-readable list of what changed in the Android app. Newest version first.
 
+## 0.0.4
+
+- New problems "two lyrics in one (tags in the middle)" and "two lyrics in one (times start over)" in the Fix list. The first is flagged when song info like [ar:...] or [ti:...] sits between lyric lines (credits at the end, other tags like [offset:0] before the lyrics, and a second block with the same times as the first, as in lyrics with a translation, are ignored). The second when the times run up, jump back near the start and run up again with mostly the same text (two synced lyrics pasted one after the other). Songs with synced lyrics are re-read once to find these.
+- New warning "same timestamp twice in a row" when two timed lines in a row have exactly the same time. It shows in the Fix list under Warnings and above the editor, where tapping it jumps to the line.
+- Songs with two lyrics in one: the editor warning has a "compare" link that opens both lyrics side by side (one above the other on narrow screens). Tap any line to play from it; both lyrics highlight their current line, so you can see which one follows the singing. "Keep this" keeps one of them (Undo brings the other back).
+- Settings > Library: "Export debug log" writes every song with problems (path, title, lyrics state, problems) and the number of songs per problem to a JSON file in the app's folder on shared storage (Android/data/dev.lrceditor/files/lrc-debug-log.json), for troubleshooting.
+- The library index now carries a data version. When it differs from the one the app expects (for example after an update that changes what is stored or checked), the app rescans all songs in the background on start and tells you when it starts and when it is done. This replaces the one-time partial re-reads.
+- A popup tells you when the app only has read access to the music folder, and lets you choose the folder again.
+- Fixed: choosing the music folder could give the app read-only access, so saving lyrics into a song opened the "save as" picker instead. The folder picker now asks for write access too, and the app tells you if it only got read access. If saving still asks where to save, choose the music folder again in Settings.
+- Editor menu: "Mark lyrics as broken" puts the song in the Fix list (group "Marked as broken") until you choose "Remove broken-lyrics mark". The mark is kept on the phone, not written into the file, and it stays when you change the lyrics, so remove it yourself once the song is fixed.
+- The Fix list is now grouped by problem. Each group has a title with its song count and can be expanded or collapsed; a song with several problems appears in each of its groups.
+- Playing a song now pauses other audio (music, podcasts) on the phone.
+
 ## 0.0.3
 
 - Fetch lyrics: the editor can now download lyrics from LRCLIB, NetEase Cloud Music and Lyricsify (tried in the order set in Settings > Lyrics sources). Synced lyrics are preferred; plain text is used if nothing synced exists. You get a preview first and can undo. NetEase can include romanization as a second line. If a site blocks the app, "Open in browser" and "Paste from clipboard" let you bring the lyrics in by hand. The app now needs internet access for this.

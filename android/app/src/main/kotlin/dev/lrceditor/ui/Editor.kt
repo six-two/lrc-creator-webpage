@@ -40,6 +40,7 @@ import dev.lrceditor.core.Issues
 import dev.lrceditor.core.Line
 import dev.lrceditor.core.LineProblem
 import dev.lrceditor.core.Lrc
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.lrceditor.data.Settings
 import dev.lrceditor.data.SwipeAction
 import dev.lrceditor.data.TimeSwipe
@@ -139,6 +140,10 @@ private fun EditorHeader(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Un
                 Text("Learning tag", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = Studio.Dim, style = MaterialTheme.typography.labelMedium)
                 LearnStateItems(ui.learn) { state -> menu = false; vm.currentUriString()?.let { vm.requestLearnState(it, ui.fileName.orEmpty(), state) } }
                 HorizontalDivider()
+                val broken by vm.brokenLyrics.collectAsStateWithLifecycle()
+                val isBroken = vm.currentUriString() in broken
+                DropdownMenuItem(text = { Text(if (isBroken) "Remove broken-lyrics mark" else "Mark lyrics as broken") },
+                    leadingIcon = { Icon(Icons.Filled.Warning, null) }, onClick = { menu = false; vm.toggleBrokenLyrics() })
                 DropdownMenuItem(text = { Text("File info") }, leadingIcon = { Icon(Icons.Filled.Info, null) },
                     onClick = { menu = false; vm.showInfo() })
             }
@@ -158,9 +163,11 @@ private fun EditorWarnings(vm: EditorViewModel, ui: UiState) {
     val parts = listOfNotNull(
         ("$untimed untimed line${if (untimed == 1) "" else "s"}" to LineProblem.UNTIMED).takeIf { untimed > 0 },
         ("times out of order" to LineProblem.OUT_OF_ORDER).takeIf { count(LineProblem.OUT_OF_ORDER) > 0 },
+        ("same time twice in a row" to LineProblem.SAME_TIME).takeIf { count(LineProblem.SAME_TIME) > 0 },
         ("odd timestamps in text" to LineProblem.ODD_TIMESTAMPS).takeIf { count(LineProblem.ODD_TIMESTAMPS) > 0 },
     )
-    if (parts.isEmpty() && !conflict) return
+    val canCompare = remember(ui.lines) { vm.doubleLyrics(ui.lines) != null }
+    if (parts.isEmpty() && !conflict && !canCompare) return
     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Filled.Warning, null, tint = Studio.Warn, modifier = Modifier.size(14.dp))
         FlowRow(Modifier.padding(start = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -168,6 +175,8 @@ private fun EditorWarnings(vm: EditorViewModel, ui: UiState) {
                 Text("$label ›", color = Studio.Warn, style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.clickable { vm.jumpToProblem(kind) }.padding(vertical = 6.dp))
             }
+            if (canCompare) Text("two lyrics in one – compare ›", color = Studio.Warn, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { vm.openCompare() }.padding(vertical = 6.dp))
             if (conflict) Text("more than one learning tag", color = Studio.Warn, style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.padding(vertical = 6.dp))
         }
@@ -183,20 +192,20 @@ private fun LineRow(vm: EditorViewModel, ui: UiState, line: Line, outOfOrder: Bo
     val compact = isCompactScreen()
     val cfg by rememberUpdatedState(ui.settings)
 
-    val swipe = rememberSwipeToDismissBoxState(confirmValueChange = { target ->
-        // Also called with Settled when a row snaps back; that must never trigger an action.
-        val action = when (target) {
+    val swipe = rememberSwipeToDismissBoxState()
+    LaunchedEffect(swipe.settledValue) {
+        val action = when (swipe.settledValue) {
             SwipeToDismissBoxValue.StartToEnd -> cfg.swipeRight
             SwipeToDismissBoxValue.EndToStart -> cfg.swipeLeft
             SwipeToDismissBoxValue.Settled -> SwipeAction.NONE
         }
         when (action) {
-            SwipeAction.DELETE -> { vm.delete(line.id); true }
+            SwipeAction.DELETE -> vm.delete(line.id)
             // Clearing keeps the row in place, so it snaps back.
-            SwipeAction.CLEAR_TIME -> { vm.setTime(line.id, null); false }
-            SwipeAction.NONE -> false
+            SwipeAction.CLEAR_TIME -> { vm.setTime(line.id, null); swipe.reset() }
+            SwipeAction.NONE -> if (swipe.settledValue != SwipeToDismissBoxValue.Settled) swipe.reset()
         }
-    })
+    }
 
     SwipeToDismissBox(
         swipe,

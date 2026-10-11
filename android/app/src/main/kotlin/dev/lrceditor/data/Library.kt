@@ -53,7 +53,22 @@ data class SongEntry(
 }
 
 @Serializable
-data class LibraryIndex(val root: String, val builtAt: Long, val songs: List<SongEntry>, val durationMs: Long = 0)
+data class LibraryIndex(val root: String, val builtAt: Long, val songs: List<SongEntry>, val durationMs: Long = 0,
+    /** [LibraryRepository.DATA_VERSION] this index was written with. A Long so it can never overflow; 0 = written before versioning. */
+    val version: Long = 0)
+
+/** One song with problems, as written by "Export debug log". */
+@Serializable
+data class DebugSong(
+    val relPath: String, val title: String, val artist: String, val lyrics: LyricsState,
+    val tags: List<String>, val issues: List<Issue>, val untimed: Int,
+)
+
+@Serializable
+data class DebugExport(
+    val appVersion: String, val dataVersion: Long, val builtAt: Long, val songCount: Int,
+    val issueCounts: Map<String, Int>, val songs: List<DebugSong>,
+)
 
 /** While [listing], [total] is the running count of files found so far; afterwards it is the final count and [found] the number processed. */
 data class ScanState(val running: Boolean = false, val found: Int = 0, val total: Int = 0, val listing: Boolean = false)
@@ -62,6 +77,7 @@ data class ScanState(val running: Boolean = false, val found: Int = 0, val total
 class LibraryRepository(private val context: Context) {
     private val file = File(context.filesDir, "library-index.json")
     private val codec = Json { ignoreUnknownKeys = true }
+    private val prettyCodec = Json { prettyPrint = true }
 
     private val _index = MutableStateFlow<LibraryIndex?>(null)
     val index: StateFlow<LibraryIndex?> = _index.asStateFlow()
@@ -71,10 +87,28 @@ class LibraryRepository(private val context: Context) {
     private val _scan = MutableStateFlow(ScanState())
     val scan: StateFlow<ScanState> = _scan.asStateFlow()
 
-    suspend fun load() = withContext(Dispatchers.IO) {
-        if (file.exists()) _index.value = runCatching { codec.decodeFromString(LibraryIndex.serializer(), file.readText()) }.getOrNull()
-            // Songs flagged with the old combined tag issue are re-read on the next scan to get the specific issues.
-            ?.let { idx -> idx.copy(songs = idx.songs.map { if (Issue.TAG_MISMATCH in it.issues.orEmpty()) it.copy(issues = null) else it }) }
+    /**
+     * Reads the saved index. Returns true if the data is from another [DATA_VERSION] (or can't be read at all) and should be
+     * rebuilt with a full rescan; an index that can still be decoded stays usable until then.
+     */
+    suspend fun load(): Boolean = withContext(Dispatchers.IO) {
+        if (!file.exists()) return@withContext false
+        val idx = runCatching { codec.decodeFromString(LibraryIndex.serializer(), file.readText()) }.getOrNull()
+        _index.value = idx
+        idx == null || idx.version != DATA_VERSION
+    }
+
+    /** Writes the songs that have problems, and how many there are of each, to [dir]/lrc-debug-log.json. Null if there is no index. */
+    suspend fun exportDebugLog(dir: File, appVersion: String): File? = withContext(Dispatchers.IO) {
+        val idx = _index.value ?: return@withContext null
+        val flagged = idx.songs.filter { it.issues.orEmpty().isNotEmpty() }
+        val export = DebugExport(
+            appVersion, idx.version, idx.builtAt, idx.songs.size,
+            flagged.flatMap { it.issues.orEmpty() }.groupingBy { it.name }.eachCount().toSortedMap(),
+            flagged.sortedBy { it.relPath }.map { DebugSong(it.relPath, it.title, it.artist, it.lyrics, it.tags, it.issues.orEmpty(), it.untimed) },
+        )
+        dir.mkdirs()
+        File(dir, "lrc-debug-log.json").also { it.writeText(prettyCodec.encodeToString(DebugExport.serializer(), export)) }
     }
 
     fun isOutdated(root: String, now: Long = System.currentTimeMillis()): Boolean {
@@ -129,7 +163,7 @@ class LibraryRepository(private val context: Context) {
         try {
             val songs = walk(root.toUri(), full, Ignore.matcher(ignoredFolders), Ignore.matcher(ignoredFiles))
             val now = System.currentTimeMillis()
-            val idx = LibraryIndex(root, now, songs, now - started)
+            val idx = LibraryIndex(root, now, songs, now - started, DATA_VERSION)
             withContext(Dispatchers.IO) {
                 val tmp = File(file.path + ".tmp")
                 tmp.writeText(codec.encodeToString(LibraryIndex.serializer(), idx))
@@ -247,6 +281,12 @@ class LibraryRepository(private val context: Context) {
 
     companion object {
         private const val TAG = "LibraryScan"
+        /**
+         * Version of everything stored in the library index. INCREASE IT whenever the stored data changes in a way old data can't
+         * be used as is: a field is added, removed or changes meaning, or [Issues.checkSong] gains or changes a check. The app
+         * then rebuilds the index with a full rescan in the background on the next start.
+         */
+        const val DATA_VERSION = 2L
         const val READ_PARALLELISM = 8
         const val LIST_PARALLELISM = 8
         const val MAX_AGE_MS = 2L * 24 * 60 * 60 * 1000

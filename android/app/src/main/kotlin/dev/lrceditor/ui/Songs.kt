@@ -9,6 +9,8 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -49,9 +51,16 @@ fun SongsScreen(vm: EditorViewModel) {
     val tags by vm.tagCounts.collectAsStateWithLifecycle()
     var showAllRecents by rememberSaveable { mutableStateOf(false) }
     // Problems need fixing; warnings (e.g. odd timestamps) are only for review.
-    val attention = remember(index) { index?.songs.orEmpty().filter { s -> s.issues.orEmpty().any { !it.warning } }.sortedWith(Search.songOrder) }
-    val warnings = remember(index) { index?.songs.orEmpty().filter { s -> s.issues.orEmpty().any { it.warning } }.sortedWith(Search.songOrder) }
+    val markedBroken by vm.brokenLyrics.collectAsStateWithLifecycle()
+    // Hand-made marks are added on top of what the scan found.
+    val songs = remember(index, markedBroken) {
+        index?.songs.orEmpty().map { s -> if (s.uri in markedBroken) s.copy(issues = s.issues.orEmpty() + Issue.BROKEN_LYRICS) else s }
+    }
+    val attention = remember(songs) { songs.filter { s -> s.issues.orEmpty().any { !it.warning } }.sortedWith(Search.songOrder) }
+    val warnings = remember(songs) { songs.filter { s -> s.issues.orEmpty().any { it.warning } }.sortedWith(Search.songOrder) }
     var showWarnings by rememberSaveable { mutableStateOf(false) }
+    // Issues whose group is folded away.
+    val collapsed = rememberSaveable { mutableStateListOf<String>() }
     val unknownLyrics = remember(index) { index?.songs?.count { it.lyrics == LyricsState.UNKNOWN } ?: 0 }
     @Composable fun lyricsFilter() = LyricsFilterRow(prefs.lyrics, unknownLyrics) { f -> vm.updateSearch { it.copy(lyrics = f) } }
 
@@ -106,7 +115,7 @@ fun SongsScreen(vm: EditorViewModel) {
                             }
                             Text(when {
                                 list.isEmpty() -> if (showWarnings) "No warnings." else "Nothing needs fixing."
-                                showWarnings -> "${list.size} song${if (list.size == 1) "" else "s"} to review: odd digits in timestamps (e.g. from a romanization tool). Tap one to open it in the editor."
+                                showWarnings -> "${list.size} song${if (list.size == 1) "" else "s"} to review: the same timestamp twice in a row, or odd digits in timestamps (e.g. from a romanization tool). Tap one to open it in the editor."
                                 else -> "${list.size} song${if (list.size == 1) "" else "s"} need attention. Tap one to open it in the editor."
                             }, color = Studio.Dim, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
                             if (!showWarnings && broken > 0) {
@@ -116,8 +125,23 @@ fun SongsScreen(vm: EditorViewModel) {
                             }
                         }
                     }
-                    items(list, key = { it.uri }) { s ->
-                        SongRow(s, settings.settings, LyricsFilter.ALL, showIssues = true, onLearn = { vm.requestLearnState(s.uri, s.displayTitle, it) }) { vm.openSong(s.uri) }
+                    // One group per issue; a song with several issues shows up in each of its groups.
+                    Issue.entries.forEach { issue ->
+                        val members = list.filter { s -> issue in s.issues.orEmpty() }
+                        if (members.isEmpty()) return@forEach
+                        val open = issue.name !in collapsed
+                        item(key = "group-${issue.name}") {
+                            Row(Modifier.fillMaxWidth().clickable { if (open) collapsed += issue.name else collapsed -= issue.name }.padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Icon(if (open) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, if (open) "Collapse" else "Expand", tint = Studio.Dim)
+                                Text("${issue.label.replaceFirstChar { it.uppercase() }} (${members.size})", Modifier.padding(start = 8.dp),
+                                    color = Studio.Warn, style = MaterialTheme.typography.titleSmall)
+                            }
+                            HorizontalDivider(color = Studio.Border)
+                        }
+                        if (open) items(members, key = { "${issue.name}:${it.uri}" }) { s ->
+                            SongRow(s, settings.settings, LyricsFilter.ALL, showIssues = true, onLearn = { vm.requestLearnState(s.uri, s.displayTitle, it) }) { vm.openSong(s.uri) }
+                        }
                     }
                 }
                 SongsMode.TITLE -> {

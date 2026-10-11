@@ -26,6 +26,7 @@ fun LrcApp(vm: EditorViewModel) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
 
+    val pickFolder = rememberLauncherForActivityResult(OpenWritableTree()) { it?.let(vm::setLibraryRoot) }
     LaunchedEffect(Unit) { vm.messages.collect { snackbar.showSnackbar(it) } }
 
     // Export targets are chosen with the system "save as" picker; the file name is pre-filled.
@@ -81,6 +82,15 @@ fun LrcApp(vm: EditorViewModel) {
     }
 
     if (ui.showLyricsDialog) LyricsTextDialog(ui.rawLyrics ?: vm.currentLrc(), ui.lyricsError, { vm.replaceAllLyrics(it) }, vm::closeLyricsDialog)
+    val compare by vm.compare.collectAsStateWithLifecycle()
+    compare?.let { CompareDialog(vm, it, ui.isPlaying) }
+    if (ui.folderReadOnly) AlertDialog(
+        onDismissRequest = vm::dismissFolderReadOnly,
+        title = { Text("Music folder is read-only") },
+        text = { Text("The app can read your music folder but not change it. Saving lyrics into songs will ask where to save instead, and tag fixes won't work. Choose the folder again and allow changes.") },
+        confirmButton = { TextButton(onClick = { vm.dismissFolderReadOnly(); pickFolder.launch(null) }) { Text("Choose folder") } },
+        dismissButton = { TextButton(onClick = vm::dismissFolderReadOnly) { Text("Later") } },
+    )
     ui.info?.let { InfoDialog(it, vm::closeInfo) }
     if (ui.confirmSave) ConfirmDialog(
         title = "Overwrite the original file?",

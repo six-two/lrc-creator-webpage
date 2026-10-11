@@ -88,7 +88,7 @@ fun SettingsScreen(vm: EditorViewModel, s: Settings) {
     }
 }
 
-/** "Version 0.0.3"; local debug builds also show when they were installed, since the version number stays the same. */
+/** "Version 0.0.4"; local debug builds also show when they were installed, since the version number stays the same. */
 @Composable
 private fun versionLabel(): String {
     val context = LocalContext.current
@@ -108,7 +108,7 @@ private fun versionLabel(): String {
 private fun ColumnScope.LibrarySettings(vm: EditorViewModel, s: Settings) {
     val index by vm.index.collectAsStateWithLifecycle()
     val scan by vm.scan.collectAsStateWithLifecycle()
-    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { it?.let(vm::setLibraryRoot) }
+    val pickFolder = rememberLauncherForActivityResult(OpenWritableTree()) { it?.let(vm::setLibraryRoot) }
     val onChange = vm::updateSettings
 
     SectionTitle("Music folder")
@@ -131,6 +131,9 @@ private fun ColumnScope.LibrarySettings(vm: EditorViewModel, s: Settings) {
         Text("Full rescan (re-read every file)")
     }
     if (scan.running) LinearProgressIndicator(Modifier.fillMaxWidth())
+    TextButton(onClick = vm::exportDebugLog, enabled = index != null) { Text("Export debug log") }
+    Text("Writes every song with problems to the app's folder on shared storage (Android/data/dev.lrceditor/files), where adb can read it.",
+        color = Studio.Faint, style = MaterialTheme.typography.bodySmall)
 
     HorizontalDivider(color = Studio.Border)
     SectionTitle("Ignored")
