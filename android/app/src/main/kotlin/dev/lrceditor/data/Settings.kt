@@ -25,6 +25,28 @@ enum class TimeSwipe(val label: String) {
     }
 }
 
+/** The lyrics sources, in the default order. */
+enum class LyricsSource(val id: String, val label: String, val note: String) {
+    LRCLIB("lrclib", "LRCLIB", "Open lyrics database. Synced and plain text."),
+    NETEASE("netease", "NetEase Cloud Music", "Large synced catalog, good for Asian music. Unofficial API; may be blocked in some regions."),
+    LYRICSIFY("lyricsify", "Lyricsify", "Best effort: the site blocks apps at times. You can then open it in the browser or paste.");
+}
+
+data class SourceSetting(val source: LyricsSource, val enabled: Boolean = true)
+
+private fun defaultSources() = LyricsSource.entries.map { SourceSetting(it) }
+
+/** "lrclib:1,netease:0" -> ordered list; unknown ids are dropped and missing sources appended (enabled). */
+internal fun parseSources(raw: String?): List<SourceSetting> {
+    val parsed = raw?.split(',')?.mapNotNull { part ->
+        val (id, on) = part.split(':').let { it.getOrNull(0) to it.getOrNull(1) }
+        LyricsSource.entries.firstOrNull { it.id == id }?.let { SourceSetting(it, on != "0") }
+    }.orEmpty().distinctBy { it.source }
+    return parsed + defaultSources().filter { d -> parsed.none { it.source == d.source } }
+}
+
+internal fun formatSources(list: List<SourceSetting>) = list.joinToString(",") { "${it.source.id}:${if (it.enabled) 1 else 0}" }
+
 data class Settings(
     val tickEnabled: Boolean = false,
     val tickVolume: Float = 0.6f,
@@ -48,6 +70,9 @@ data class Settings(
     val swipeLeft: SwipeAction = SwipeAction.DELETE,
     val swipeRight: SwipeAction = SwipeAction.CLEAR_TIME,
     val timeSwipe: TimeSwipe = TimeSwipe.HORIZONTAL,
+    /** Lyrics sources in the order they are tried. */
+    val lyricsSources: List<SourceSetting> = defaultSources(),
+    val lyricsTimeoutSec: Int = 10,
 )
 
 internal val Context.dataStore by preferencesDataStore("settings")
@@ -70,6 +95,8 @@ class SettingsStore(private val context: Context) {
         val swipeLeft = stringPreferencesKey("swipe_left")
         val swipeRight = stringPreferencesKey("swipe_right")
         val timeSwipe = stringPreferencesKey("time_swipe")
+        val lyricsSources = stringPreferencesKey("lyrics_sources")
+        val lyricsTimeout = intPreferencesKey("lyrics_timeout_sec")
     }
 
     val flow: Flow<Settings> = context.dataStore.data.map { p ->
@@ -88,6 +115,8 @@ class SettingsStore(private val context: Context) {
             swipeLeft = SwipeAction.parse(p[K.swipeLeft], SwipeAction.DELETE),
             swipeRight = SwipeAction.parse(p[K.swipeRight], SwipeAction.CLEAR_TIME),
             timeSwipe = TimeSwipe.parse(p[K.timeSwipe]),
+            lyricsSources = parseSources(p[K.lyricsSources]),
+            lyricsTimeoutSec = p[K.lyricsTimeout] ?: 10,
             ignoredFolders = p[K.ignored]?.split('\n')?.filter { it.isNotBlank() } ?: Ignore.DEFAULTS,
             ignoredFiles = p[K.ignoredFiles]?.split('\n')?.filter { it.isNotBlank() } ?: Ignore.DEFAULT_FILES,
         )
@@ -103,6 +132,7 @@ class SettingsStore(private val context: Context) {
             p[K.showFileName] = s.showFileName; p[K.showPath] = s.showPath
             p[K.swipeLeft] = s.swipeLeft.name; p[K.swipeRight] = s.swipeRight.name
             p[K.timeSwipe] = s.timeSwipe.name
+            p[K.lyricsSources] = formatSources(s.lyricsSources); p[K.lyricsTimeout] = s.lyricsTimeoutSec
             if (s.libraryRoot != null) p[K.root] = s.libraryRoot else p.remove(K.root)
         }
     }

@@ -4,7 +4,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 
 object Studio {
     val Bg = Color(0xFF12151C)
@@ -35,4 +36,4 @@ fun LrcTheme(content: @Composable () -> Unit) = MaterialTheme(colorScheme = sche
 
 /** Short screens (e.g. the Unihertz Jelly Star) get tighter layouts. */
 @Composable
-fun isCompactScreen(): Boolean = LocalConfiguration.current.screenHeightDp < 700
+fun isCompactScreen(): Boolean = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp().value } < 700

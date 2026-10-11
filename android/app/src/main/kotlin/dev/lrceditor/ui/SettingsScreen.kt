@@ -1,6 +1,8 @@
 package dev.lrceditor.ui
 
+import android.content.pm.ApplicationInfo
 import android.net.Uri
+import androidx.core.net.toUri
 import android.provider.DocumentsContract
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -24,6 +26,8 @@ import androidx.compose.ui.text.input.ImeAction
 import dev.lrceditor.core.Ignore
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -39,8 +43,9 @@ import dev.lrceditor.data.TimeSwipe
 
 private enum class SettingsPage(val title: String, val summary: String, val icon: ImageVector) {
     LIBRARY("Library", "Music folder, scanning, ignored folders and files", Icons.Filled.LibraryMusic),
-    SEARCH("Search", "What each song shows in the Songs tab", Icons.Filled.Search),
+    SEARCH("Search", "What each song shows in the Library", Icons.Filled.Search),
     EDITOR("Editor", "Timing, tick sound and swipe gestures", Icons.Filled.Timer),
+    LYRICS("Lyrics sources", "Where to fetch lyrics from, and in which order", Icons.Filled.CloudDownload),
     SAVING("Saving", "Writing lyrics into the MP3", Icons.Filled.Save),
 }
 
@@ -71,13 +76,31 @@ fun SettingsScreen(vm: EditorViewModel, s: Settings) {
                     }
                     // Keep the chosen library folder: it is not one of the "defaults".
                     TextButton(onClick = { vm.updateSettings(Settings(libraryRoot = s.libraryRoot)) }) { Text("Reset all to defaults") }
+                    Text(versionLabel(), color = Studio.Faint, style = MaterialTheme.typography.bodySmall)
                 }
                 SettingsPage.LIBRARY -> LibrarySettings(vm, s)
                 SettingsPage.SEARCH -> SearchSettings(s, vm::updateSettings)
                 SettingsPage.EDITOR -> EditorSettings(s, vm::updateSettings)
+                SettingsPage.LYRICS -> LyricsSettings(s, vm::updateSettings)
                 SettingsPage.SAVING -> SavingSettings(s, vm::updateSettings)
             }
         }
+    }
+}
+
+/** "Version 0.0.3"; local debug builds also show when they were installed, since the version number stays the same. */
+@Composable
+private fun versionLabel(): String {
+    val context = LocalContext.current
+    return remember {
+        runCatching {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            val debuggable = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+            val base = "Version ${info.versionName}"
+            if (debuggable) base + " · debug build installed " +
+                DateUtils.formatDateTime(context, info.lastUpdateTime, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_ABBREV_MONTH)
+            else base
+        }.getOrDefault("")
     }
 }
 
@@ -152,6 +175,30 @@ private fun ColumnScope.EditorSettings(s: Settings, onChange: (Settings) -> Unit
 }
 
 @Composable
+private fun ColumnScope.LyricsSettings(s: Settings, onChange: (Settings) -> Unit) {
+    Text("\"Fetch lyrics\" in the editor tries the enabled sources from top to bottom. The first synced result wins; if no source has synced lyrics, the first plain-text result is offered. You always get a preview before anything changes.",
+        color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+    fun move(i: Int, d: Int) {
+        val list = s.lyricsSources.toMutableList()
+        list.add(i + d, list.removeAt(i))
+        onChange(s.copy(lyricsSources = list))
+    }
+    s.lyricsSources.forEachIndexed { i, src ->
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("${i + 1}. ${src.source.label}", style = MaterialTheme.typography.titleSmall)
+                Text(src.source.note, color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+            }
+            IconButton({ move(i, -1) }, enabled = i > 0) { Icon(Icons.Filled.ArrowUpward, "Move up") }
+            IconButton({ move(i, 1) }, enabled = i < s.lyricsSources.lastIndex) { Icon(Icons.Filled.ArrowDownward, "Move down") }
+            Switch(src.enabled, { on -> onChange(s.copy(lyricsSources = s.lyricsSources.map { if (it.source == src.source) it.copy(enabled = on) else it })) })
+        }
+        HorizontalDivider(color = Studio.Border.copy(alpha = 0.5f))
+    }
+    RadioChoice("Timeout per request", s.lyricsTimeoutSec, listOf(5, 10, 20, 30), { "$it seconds" }) { onChange(s.copy(lyricsTimeoutSec = it)) }
+}
+
+@Composable
 private fun ColumnScope.SavingSettings(s: Settings, onChange: (Settings) -> Unit) {
     SwitchRow("Ask before overwriting the original MP3", s.confirmOverwrite) { onChange(s.copy(confirmOverwrite = it)) }
     Text("The save button writes the lyrics into the MP3 you are editing. Needs write access to the music folder; choose the folder again if saving fails.",
@@ -204,7 +251,7 @@ private fun formatDuration(ms: Long): String {
 }
 
 private fun folderLabel(tree: String): String =
-    runCatching { DocumentsContract.getTreeDocumentId(Uri.parse(tree)) }.getOrNull()?.substringAfter(':')?.ifBlank { "Storage root" } ?: tree
+    runCatching { DocumentsContract.getTreeDocumentId(tree.toUri()) }.getOrNull()?.substringAfter(':')?.ifBlank { "Storage root" } ?: tree
 
 @Composable
 private fun SectionTitle(t: String) = Text(t, color = Studio.Amber, style = MaterialTheme.typography.titleSmall)

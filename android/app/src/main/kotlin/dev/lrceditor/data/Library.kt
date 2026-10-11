@@ -2,12 +2,16 @@ package dev.lrceditor.data
 
 import android.content.ContentProviderClient
 import android.content.Context
+import android.util.Log
 import android.os.Bundle
 import android.net.Uri
+import androidx.core.net.toUri
 import android.provider.DocumentsContract
 import dev.lrceditor.core.DocPath
 import dev.lrceditor.core.Id3
 import dev.lrceditor.core.Ignore
+import dev.lrceditor.core.Issue
+import dev.lrceditor.core.Issues
 import dev.lrceditor.core.LyricsState
 import dev.lrceditor.core.Lrc
 import dev.lrceditor.core.Search
@@ -38,6 +42,10 @@ data class SongEntry(
     val size: Long,
     val modified: Long,
     val lyrics: LyricsState = LyricsState.UNKNOWN,
+    /** Problems found when the file was read. null = indexed before this existed (forces one re-read). */
+    val issues: List<Issue>? = null,
+    /** Number of untimed lines, for the [Issue.UNTIMED_LINES] label. */
+    val untimed: Int = 0,
 ) {
     val displayTitle get() = title.ifBlank { Lrc.baseName(fileName) }
     /** Path below the music folder, e.g. `Artist/Album/Song.mp3` (derived from the document URI). */
@@ -57,11 +65,16 @@ class LibraryRepository(private val context: Context) {
 
     private val _index = MutableStateFlow<LibraryIndex?>(null)
     val index: StateFlow<LibraryIndex?> = _index.asStateFlow()
+    private val unreadable = AtomicInteger()
+    /** Folders that could not be listed in the last scan (skipped). */
+    val skippedFolders: Int get() = unreadable.get()
     private val _scan = MutableStateFlow(ScanState())
     val scan: StateFlow<ScanState> = _scan.asStateFlow()
 
     suspend fun load() = withContext(Dispatchers.IO) {
         if (file.exists()) _index.value = runCatching { codec.decodeFromString(LibraryIndex.serializer(), file.readText()) }.getOrNull()
+            // Songs flagged with the old combined tag issue are re-read on the next scan to get the specific issues.
+            ?.let { idx -> idx.copy(songs = idx.songs.map { if (Issue.TAG_MISMATCH in it.issues.orEmpty()) it.copy(issues = null) else it }) }
     }
 
     fun isOutdated(root: String, now: Long = System.currentTimeMillis()): Boolean {
@@ -69,15 +82,27 @@ class LibraryRepository(private val context: Context) {
         return i.root != root || now - i.builtAt > MAX_AGE_MS
     }
 
-    /** Keeps the cached lyrics state of a song in sync after we saved lyrics into it. */
-    suspend fun setLyrics(uri: String, state: LyricsState) = withContext(Dispatchers.IO) {
+    /** Replaces one song's cached entry (e.g. after we rewrote its file) and persists the index. */
+    suspend fun updateEntry(uri: String, f: (SongEntry) -> SongEntry) = withContext(Dispatchers.IO) {
         val cur = _index.value ?: return@withContext
         if (cur.songs.none { it.uri == uri }) return@withContext
-        val updated = cur.copy(songs = cur.songs.map { if (it.uri == uri) it.copy(lyrics = state) else it })
+        val updated = cur.copy(songs = cur.songs.map { if (it.uri == uri) f(it) else it })
         _index.value = updated
+        persist(updated)
+    }
+
+    /** Same, for many songs at once (one write). */
+    suspend fun updateEntries(changes: Map<String, (SongEntry) -> SongEntry>) = withContext(Dispatchers.IO) {
+        val cur = _index.value ?: return@withContext
+        val updated = cur.copy(songs = cur.songs.map { s -> changes[s.uri]?.invoke(s) ?: s })
+        _index.value = updated
+        persist(updated)
+    }
+
+    private fun persist(idx: LibraryIndex) {
         runCatching {
             val tmp = File(file.path + ".tmp")
-            tmp.writeText(codec.encodeToString(LibraryIndex.serializer(), updated))
+            tmp.writeText(codec.encodeToString(LibraryIndex.serializer(), idx))
             tmp.renameTo(file)
         }
     }
@@ -102,7 +127,7 @@ class LibraryRepository(private val context: Context) {
         _scan.value = ScanState(running = true, listing = true)
         val started = System.currentTimeMillis()
         try {
-            val songs = walk(Uri.parse(root), full, Ignore.matcher(ignoredFolders), Ignore.matcher(ignoredFiles))
+            val songs = walk(root.toUri(), full, Ignore.matcher(ignoredFolders), Ignore.matcher(ignoredFiles))
             val now = System.currentTimeMillis()
             val idx = LibraryIndex(root, now, songs, now - started)
             withContext(Dispatchers.IO) {
@@ -139,11 +164,19 @@ class LibraryRepository(private val context: Context) {
             async(Dispatchers.IO) {
                 val key = uri.toString()
                 val prev = old[key]
-                val entry = if (prev != null && prev.size == c.size && prev.modified == c.modified && prev.lyrics != LyricsState.UNKNOWN) prev
+                val entry = if (prev != null && prev.size == c.size && prev.modified == c.modified &&
+                    prev.lyrics != LyricsState.UNKNOWN && prev.issues != null) prev
                 else gate.withPermit {
                     val meta = runCatching { resolver.openInputStream(uri)?.use { Id3.readMeta(it) } }.getOrNull()
+                    val tags = Search.parseTags(meta?.grouping.orEmpty())
                     SongEntry(key, c.name, meta?.title.orEmpty(), meta?.artist.orEmpty(), meta?.album.orEmpty(),
-                        Search.parseTags(meta?.grouping.orEmpty()), c.size, c.modified, meta?.lyrics ?: LyricsState.UNKNOWN)
+                        tags, c.size, c.modified, meta?.lyrics ?: LyricsState.UNKNOWN,
+                        issues = meta?.let { m ->
+                            // A song whose lyrics can't be checked must never abort the whole scan.
+                            runCatching { Issues.checkSong(tags, m.lyricsText, m.syltOnly).toList() }
+                                .onFailure { Log.e(TAG, "Could not check ${c.name}", it) }.getOrDefault(emptyList())
+                        } ?: emptyList(),
+                        untimed = runCatching { Issues.untimedCount(meta?.lyricsText) }.getOrDefault(0))
                 }
                 val n = done.incrementAndGet()
                 if (n % 25 == 0 || n == total) _scan.value = ScanState(true, n, total)
@@ -161,9 +194,19 @@ class LibraryRepository(private val context: Context) {
     ): List<Pair<Child, Uri>> {
         val gate = Semaphore(LIST_PARALLELISM)
         val found = AtomicInteger()
+        unreadable.set(0)
 
         suspend fun visit(docId: String): List<Pair<Child, Uri>> = coroutineScope {
-            val kids = gate.withPermit { withContext(Dispatchers.IO) { children(client, tree, docId) } }
+            val kids = gate.withPermit {
+                withContext(Dispatchers.IO) {
+                    // Provider reads are flaky under parallel load (e.g. "Couldn't read row 0, col 2 from CursorWindow"):
+                    // retry once, then skip just this folder instead of failing the whole scan.
+                    runCatching { children(client, tree, docId) }
+                        .recoverCatching { children(client, tree, docId) }
+                        .onFailure { Log.e(TAG, "Could not list folder $docId", it); unreadable.incrementAndGet() }
+                        .getOrDefault(emptyList())
+                }
+            }
             val here = ArrayList<Pair<Child, Uri>>()
             val subDirs = ArrayList<Deferred<List<Pair<Child, Uri>>>>()
             for (c in kids) {
@@ -180,6 +223,14 @@ class LibraryRepository(private val context: Context) {
         return visit(DocumentsContract.getTreeDocumentId(tree))
     }
 
+    /** Size / modified columns are numbers by contract, but some providers return odd strings (e.g. "0 2"): treat those as 0. */
+    private fun numberAt(c: android.database.Cursor, i: Int): Long = when (c.getType(i)) {
+        android.database.Cursor.FIELD_TYPE_INTEGER -> c.getLong(i)
+        android.database.Cursor.FIELD_TYPE_FLOAT -> c.getDouble(i).toLong()
+        android.database.Cursor.FIELD_TYPE_STRING -> c.getString(i)?.trim()?.toLongOrNull() ?: 0L
+        else -> 0L
+    }
+
     private fun children(client: ContentProviderClient, tree: Uri, parentDocId: String): List<Child> {
         val uri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentDocId)
         val cols = arrayOf(
@@ -189,12 +240,13 @@ class LibraryRepository(private val context: Context) {
         )
         val list = ArrayList<Child>()
         client.query(uri, cols, Bundle.EMPTY, null)?.use { c ->
-            while (c.moveToNext()) list += Child(c.getString(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getLong(3), c.getLong(4))
+            while (c.moveToNext()) list += Child(c.getString(0), c.getString(1) ?: "", c.getString(2) ?: "", numberAt(c, 3), numberAt(c, 4))
         }
         return list
     }
 
     companion object {
+        private const val TAG = "LibraryScan"
         const val READ_PARALLELISM = 8
         const val LIST_PARALLELISM = 8
         const val MAX_AGE_MS = 2L * 24 * 60 * 60 * 1000

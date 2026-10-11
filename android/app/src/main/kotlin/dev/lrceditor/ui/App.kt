@@ -12,11 +12,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.lrceditor.EditorViewModel
 import dev.lrceditor.ExportKind
 import dev.lrceditor.Tab
+import dev.lrceditor.TagAction
+import dev.lrceditor.core.LearnState
 
 @Composable
 fun LrcApp(vm: EditorViewModel) {
@@ -38,8 +41,11 @@ fun LrcApp(vm: EditorViewModel) {
         }
     }
 
-    // Back from Songs/Settings returns to the editor (if a song is open); back from the editor leaves the app.
-    BackHandler(enabled = ui.tab != Tab.EDITOR && ui.loaded) { vm.showTab(Tab.EDITOR) }
+    // Back returns to the screen we came from (e.g. to the list a song was opened from); with nowhere to go it leaves the app.
+    BackHandler(enabled = ui.canGoBack) { vm.back() }
+
+    // Keeps each tab's scroll position and search state while another tab is showing.
+    val tabState = rememberSaveableStateHolder()
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -48,8 +54,10 @@ fun LrcApp(vm: EditorViewModel) {
             // On short screens drop the icons (and the big pill indicator) to give the content more room.
             val compact = isCompactScreen()
             if (compact) CompactTabBar(ui.tab, ui.dirty, vm::showTab) else NavigationBar(containerColor = Studio.Panel) {
-                NavigationBarItem(ui.tab == Tab.SONGS, { vm.showTab(Tab.SONGS) },
-                    icon = { Icon(Icons.Filled.LibraryMusic, null) }, label = { Text("Songs") })
+                NavigationBarItem(ui.tab == Tab.LIBRARY, { vm.showTab(Tab.LIBRARY) },
+                    icon = { Icon(Icons.Filled.LibraryMusic, null) }, label = { Text("Library") })
+                NavigationBarItem(ui.tab == Tab.LEARN, { vm.showTab(Tab.LEARN) },
+                    icon = { Icon(Icons.Filled.School, null) }, label = { Text("Learn") })
                 NavigationBarItem(ui.tab == Tab.EDITOR, { vm.showTab(Tab.EDITOR) },
                     icon = {
                         BadgedBox(badge = { if (ui.dirty) Badge(containerColor = Studio.Amber) }) { Icon(Icons.Filled.Timer, null) }
@@ -60,18 +68,19 @@ fun LrcApp(vm: EditorViewModel) {
         },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
-            when (ui.tab) {
-                Tab.SONGS -> SongsScreen(vm)
+            tabState.SaveableStateProvider(ui.tab) { when (ui.tab) {
+                Tab.LIBRARY -> SongsScreen(vm)
+                Tab.LEARN -> LearnScreen(vm)
                 Tab.EDITOR -> EditorScreen(vm, ui,
                     onSaveLrcAs = { createLrc.launch(vm.suggestedName(ExportKind.LRC)) },
                     onSaveMp3As = { createMp3.launch(vm.suggestedName(ExportKind.MP3)) })
                 Tab.SETTINGS -> SettingsScreen(vm, ui.settings)
-            }
+            } }
             if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         }
     }
 
-    if (ui.showLyricsDialog) LyricsTextDialog(vm.currentLrc(), vm::replaceAllLyrics, vm::closeLyricsDialog)
+    if (ui.showLyricsDialog) LyricsTextDialog(ui.rawLyrics ?: vm.currentLrc(), ui.lyricsError, { vm.replaceAllLyrics(it) }, vm::closeLyricsDialog)
     ui.info?.let { InfoDialog(it, vm::closeInfo) }
     if (ui.confirmSave) ConfirmDialog(
         title = "Overwrite the original file?",
@@ -83,6 +92,17 @@ fun LrcApp(vm: EditorViewModel) {
         text = "The lyrics of \"${ui.fileName}\" go back to how they were when last loaded or saved. You can still bring the changes back with Undo.",
         confirm = "Discard", onConfirm = vm::confirmDiscard, onDismiss = vm::dismissDiscard,
     )
+    ui.pendingTag?.let { a ->
+        ConfirmDialog(
+            title = "Change tags in the file?",
+            text = when (a) {
+                is TagAction.SetLearn -> "The tags of \"${a.name}\" are rewritten in place (${a.state.label.let { if (a.state == LearnState.NONE) "learning tag removed" else "marked $it" }}). Other tags and the lyrics are kept."
+                is TagAction.FixAll -> "The Lyrics and Karaoke tags of ${a.count} songs are rewritten in place to match their lyrics. Other tags and the lyrics are kept."
+            },
+            confirm = "Change", onConfirm = vm::confirmTagAction, onDismiss = vm::dismissTagAction,
+        )
+    }
+    ui.fetch?.let { FetchDialog(it, vm) }
     if (ui.pendingOpen != null) ConfirmDialog(
         title = "Open another song?",
         text = "You have unexported changes to \"${ui.fileName}\". Opening the new file will discard them.",
@@ -95,7 +115,7 @@ fun LrcApp(vm: EditorViewModel) {
 private fun CompactTabBar(selected: Tab, dirty: Boolean, onSelect: (Tab) -> Unit) {
     Surface(color = Studio.Panel) {
         Row(Modifier.fillMaxWidth().navigationBarsPadding().height(44.dp)) {
-            listOf(Tab.SONGS to "Songs", Tab.EDITOR to "Editor", Tab.SETTINGS to "Settings").forEach { (tab, label) ->
+            listOf(Tab.LIBRARY to "Library", Tab.LEARN to "Learn", Tab.EDITOR to "Editor", Tab.SETTINGS to "Settings").forEach { (tab, label) ->
                 val on = tab == selected
                 Box(
                     Modifier.weight(1f).fillMaxHeight().clickable { onSelect(tab) },

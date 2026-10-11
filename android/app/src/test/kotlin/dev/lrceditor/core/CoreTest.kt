@@ -1,5 +1,8 @@
 package dev.lrceditor.core
 
+import dev.lrceditor.data.*
+import dev.lrceditor.data.lyrics.*
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -13,9 +16,74 @@ class CoreTest {
         assertEquals("[00:01.00]This is a multiline text\nDies ist ein Mehrzeilen-Text\n[00:02.00]Normal single line text", Lrc.serialize(lines))
     }
 
-    @Test fun untimedLinesGetPrecedingTimestamp() {
+    @Test fun untimedLinesAreSavedAsZeroAndReadBackUntimed() {
         val lines = listOf(Lrc.newLine(5000, "a"), Lrc.newLine(null, "b"))
-        assertEquals("[00:05.00]a\n[00:05.00]b", Lrc.serialize(lines))
+        assertEquals("[00:05.00]a\n[00:00.00]b", Lrc.serialize(lines))
+        val back = Lrc.parse(Lrc.serialize(lines))
+        assertEquals(listOf<Long?>(5000L, null), back.map { it.timeMs })
+        assertEquals(listOf("a", "b"), back.map { it.text })
+    }
+
+    @Test fun zeroOnFirstLyricLineIsARealTime() {
+        val lines = Lrc.parse("[ti:x]\n[00:00.00]first\n[00:05.00]second\n[00:00.00]odd one")
+        assertEquals(listOf<Long?>(10L, 5000L, null), lines.map { it.timeMs })
+        // saved as 00:00.01 and stable afterwards
+        assertEquals("[00:00.01]first\n[00:05.00]second\n[00:00.00]odd one", Lrc.serialize(lines))
+        assertEquals(lines.map { it.timeMs }, Lrc.parse(Lrc.serialize(lines)).map { it.timeMs })
+        // a blank pause before it doesn't count as the first lyric line, but the text line does
+        assertEquals(listOf<Long?>(null, 10L, 3000L), Lrc.parse("[00:00.00]\n[00:00.00]a\n[00:03.00]b").map { it.timeMs })
+        // all zero = an unfinished song saved by this app: stays untimed
+        assertEquals(listOf<Long?>(null, null), Lrc.parse("[00:00.00]a\n[00:00.00]b").map { it.timeMs })
+        assertTrue(Lrc.isFullyTimed(Lrc.parse("[00:00.00]a\n[00:04.00]b")))
+    }
+
+    @Test fun realZeroIsClampedSoItStaysTimed() {
+        assertEquals(10L, Lrc.clampTime(0))
+        val back = Lrc.parse(Lrc.serialize(listOf(Lrc.newLine(0, "x"), Lrc.newLine(3, "y"))))
+        assertEquals(listOf<Long?>(10L, 10L), back.map { it.timeMs })
+    }
+
+    @Test fun fullyTimedIgnoresRomanizationAndPauses() {
+        val src = "[00:01.00]こんにちは\nkonnichiwa\n[00:03.00]\n[00:05.00]bye\nbai"
+        val lines = Lrc.parse(src)
+        assertTrue(Lrc.isFullyTimed(lines))
+        assertEquals(0, Lrc.countUntimed(lines))
+        assertTrue(Lrc.isFullyTimed(Lrc.parse(Lrc.serialize(lines))))
+    }
+
+    @Test fun metadataLinesAreNotLyrics() {
+        val src = "[ti: Song]\n[al: Some Album]\n[ar:Me]\n[00:01.00]a\n[offset:0]\n[00:02.00]b"
+        val lines = Lrc.parse(src)
+        assertEquals(listOf("a", "b"), lines.map { it.text })
+        assertTrue(Lrc.isFullyTimed(lines))
+        assertEquals(emptySet<Issue>(), Issues.checkSong(listOf("Lyrics", "Karaoke"), src))
+    }
+
+    @Test fun fancyUnicodeDigitsAreNotTimestamps() {
+        val src = "[\uD835\uDFF6\uD835\uDFF9:\uD835\uDFF6\uD835\uDFF8.00]odd digits\n[00:05.00]normal"
+        val lines = Lrc.parse(src) // must not throw
+        assertEquals(1, lines.count { it.timeMs != null })
+        assertTrue(Issue.ODD_TIMESTAMPS in Issues.checkSong(emptyList(), src))
+        assertTrue(Issue.ODD_TIMESTAMPS.warning)
+        assertFalse(Issue.ODD_TIMESTAMPS in Issues.checkSong(listOf("Lyrics", "Karaoke"), "[00:01.00]fine\nromaji [x]"))
+        assertTrue(Lrc.hasOddTimestamps("[00:01.00]a\n[\uD835\uDFF6\uD835\uDFF9:00.00]b"))
+        assertFalse(Lrc.hasOddTimestamps("[00:01.00]a"))
+        assertEquals(Lrc.TimeInput.Invalid, Lrc.parseTimeInput("\uD835\uDFF6\uD835\uDFF9:00"))
+    }
+
+    @Test fun metadataWithNestedBracketsIsSkipped() {
+        val src = "[ti:something [english ver.]]\n[ar: A [feat. B]]\n[00:01.00]a\n[00:02.00]b"
+        assertEquals(listOf("a", "b"), Lrc.parse(src).map { it.text })
+        assertEquals(emptySet<Issue>(), Issues.checkSong(listOf("Lyrics", "Karaoke"), src))
+        assertEquals("[00:01.00]a", LyricsText.stripMetadata("[ti:x [y]]\n[00:01.00]a"))
+    }
+
+    @Test fun partialTimingIsNotFullyTimed() {
+        val lines = listOf(Lrc.newLine(1000, "a"), Lrc.newLine(null, "b"), Lrc.newLine(null, ""), Lrc.newLine(4000, "c"))
+        assertFalse(Lrc.isFullyTimed(lines))
+        assertEquals(1, Lrc.countUntimed(lines))
+        assertFalse(Lrc.isFullyTimed(Lrc.parse(Lrc.serialize(lines))))
+        assertFalse(Lrc.isFullyTimed(Lrc.plainTextToLines("one\ntwo")))
     }
 
     @Test fun shortTimeFormat() {
@@ -126,5 +194,389 @@ class DocPathTest {
         assertEquals("日本語/曲.mp3", DocPath.relativePath("content://a/tree/p%3AM/document/p%3AM%2F%E6%97%A5%E6%9C%AC%E8%AA%9E%2F%E6%9B%B2.mp3"))
         assertNull(DocPath.relativePath("content://a/document/p%3AM%2Fx.mp3"))
         assertEquals("/storage/emulated/0/Music/a b/x.mp3", DocPath.fullPath("content://a/tree/primary%3AMusic/document/primary%3AMusic%2Fa%20b%2Fx.mp3"))
+    }
+}
+
+class LearnTagTest {
+    @Test fun learnStateSwapsAndKeepsOtherTags() {
+        val tags = listOf("Anime", "learn", "English", "Lyrics")
+        assertEquals(listOf("Anime", "English", "Lyrics", "SingAlong"), Search.withLearnState(tags, LearnState.SING_ALONG))
+        assertEquals(listOf("Anime", "English", "Lyrics"), Search.withLearnState(tags, LearnState.NONE))
+        assertEquals(listOf("Anime", "learn", "English", "Lyrics"), Search.withLearnState(tags, LearnState.LEARN))
+        assertEquals(listOf("Anime", "Unsingable"), Search.withLearnState(listOf("SINGALONG", "Anime", "Learn"), LearnState.UNSINGABLE))
+        assertEquals(listOf("Learn"), Search.withLearnState(emptyList(), LearnState.LEARN))
+    }
+
+    @Test fun learnStateOf() {
+        assertEquals(LearnState.NONE, Search.learnStateOf(listOf("Anime")))
+        assertEquals(LearnState.UNSINGABLE, Search.learnStateOf(listOf("Anime", "unsingable")))
+    }
+
+    private fun lines(vararg t: Long?) = t.map { Lrc.newLine(it, "x") }
+
+    @Test fun lyricsAndKaraokeTags() {
+        val full = lines(1000, 2000)
+        assertEquals(listOf("Anime", "Lyrics", "Karaoke"), Search.withLyricsTags(listOf("Anime"), full))
+        assertEquals(listOf("Anime", "Lyrics"), Search.withLyricsTags(listOf("Anime", "karaoke"), lines(1000, null)))
+        assertEquals(listOf("Anime"), Search.withLyricsTags(listOf("Anime", "LYRICS", "Karaoke"), emptyList()))
+        assertEquals(listOf("Anime"), Search.withLyricsTags(listOf("Anime", "Lyrics"), listOf(Lrc.newLine(null, ""))))
+        // already right: nothing moves
+        assertEquals(listOf("Lyrics", "Anime", "Karaoke"), Search.withLyricsTags(listOf("Lyrics", "Anime", "Karaoke"), full))
+    }
+}
+
+class GroupingWriteTest {
+    private fun frame(id: String, p: ByteArray) = id.toByteArray() + byteArrayOf(0, 0, 0, p.size.toByte(), 0, 0) + p
+    private fun text(enc: Int, s: String) = byteArrayOf(enc.toByte()) + s.toByteArray(if (enc == 0) Charsets.ISO_8859_1 else Charsets.UTF_8)
+    private val audio = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0, 1, 2, 3, 4)
+    private fun file(vararg frames: ByteArray): ByteArray {
+        val body = frames.fold(ByteArray(0)) { a, b -> a + b }
+        return byteArrayOf(0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, body.size.toByte()) + body + audio
+    }
+    private fun meta(b: ByteArray) = Id3.readMeta(java.io.ByteArrayInputStream(b))
+    private fun tags(b: ByteArray) = Search.parseTags(meta(b).grouping)
+
+    @Test fun rewritesTit1KeepingOtherFramesAndAudio() {
+        val tit2 = text(3, "Song"); val apic = byteArrayOf(0, 9, 9, 9)
+        val f = file(frame("TIT2", tit2), frame("TIT1", text(0, "Anime; Learn")), frame("APIC", apic))
+        val out = Id3.setGrouping(f, Search.withLearnState(Search.parseTags("Anime; Learn"), LearnState.SING_ALONG))
+        val p = Id3.parse(out)
+        assertEquals(listOf("TIT2", "TIT1", "APIC"), p.frames.map { it.id })
+        assertArrayEquals(tit2, p.frames[0].data)
+        assertArrayEquals(apic, p.frames[2].data)
+        assertArrayEquals(audio, out.copyOfRange(p.audioStart, out.size))
+        assertEquals(listOf("Anime", "SingAlong"), tags(out))
+        assertEquals("Song", meta(out).title)
+    }
+
+    @Test fun writesToGrp1WhenThatIsWhatExistsAndCreatesTit1WhenNeither() {
+        val g = Id3.setGrouping(file(frame("GRP1", text(0, "Old"))), listOf("New", "Learn"))
+        assertEquals(listOf("GRP1"), Id3.parse(g).frames.map { it.id })
+        assertEquals(listOf("New", "Learn"), tags(g))
+        val n = Id3.setGrouping(file(frame("TIT2", text(3, "Song"))), listOf("Learn"))
+        assertEquals(listOf("TIT2", "TIT1"), Id3.parse(n).frames.map { it.id })
+        assertEquals(listOf("Learn"), tags(n))
+        val bare = Id3.setGrouping(audio, listOf("Learn"))
+        assertEquals(listOf("Learn"), tags(bare))
+        assertArrayEquals(audio, bare.copyOfRange(Id3.parse(bare).audioStart, bare.size))
+    }
+
+    @Test fun nonLatinTagsUseUtf16AndEmptyRemovesFrame() {
+        val out = Id3.setGrouping(file(frame("TIT1", text(0, "a"))), listOf("アニメ", "Learn"))
+        assertEquals(listOf("アニメ", "Learn"), tags(out))
+        assertEquals(emptyList<String>(), tags(Id3.setGrouping(out, emptyList())))
+        assertTrue(Id3.parse(Id3.setGrouping(out, emptyList())).frames.isEmpty())
+    }
+
+    @Test fun lyricsAndTagsInOnePass() {
+        val f = file(frame("TIT1", text(0, "Anime; Learn")))
+        val lines = Lrc.parse("[00:01.00]a\n[00:02.00]b")
+        val tags = Search.withLyricsTags(Search.parseTags("Anime; Learn"), lines)
+        val out = Id3.update(f, Lrc.serialize(lines), tags)
+        val m = meta(out)
+        assertEquals(listOf("Anime", "Learn", "Lyrics", "Karaoke"), Search.parseTags(m.grouping))
+        assertEquals("[00:01.00]a\n[00:02.00]b", m.lyricsText)
+        assertEquals(Search.learnStateOf(Search.parseTags(m.grouping)), LearnState.LEARN)
+        // learn-state-only change keeps the lyrics byte for byte
+        val again = Id3.setGrouping(out, Search.withLearnState(tags, LearnState.NONE))
+        assertEquals(m.lyricsText, meta(again).lyricsText)
+        assertEquals(listOf("Anime", "Lyrics", "Karaoke"), tags(again))
+    }
+}
+
+class IssuesTest {
+    private fun check(tags: String, lyrics: String?, sylt: Boolean = false) = Issues.checkSong(Search.parseTags(tags), lyrics, sylt)
+
+    @Test fun cleanSong() {
+        assertEquals(emptySet<Issue>(), check("Lyrics; Karaoke", "[00:01.00]a\n[00:02.00]b"))
+        assertEquals(emptySet<Issue>(), check("", null))
+        assertEquals(emptySet<Issue>(), check("Lyrics", "just words"))
+    }
+
+    @Test fun untimedAndMismatch() {
+        val r = check("Lyrics; Karaoke", "[00:01.00]a\n[00:00.00]b")
+        assertEquals(setOf(Issue.UNTIMED_LINES, Issue.UNDESERVED_KARAOKE_TAG), r)
+        assertEquals(1, Issues.untimedCount("[00:01.00]a\n[00:00.00]b"))
+        assertEquals(0, Issues.untimedCount("plain words"))
+    }
+
+    @Test fun specificTagIssues() {
+        assertEquals(setOf(Issue.MISSING_LYRICS_TAG, Issue.MISSING_KARAOKE_TAG), check("", "[00:01.00]a"))
+        assertEquals(setOf(Issue.MISSING_KARAOKE_TAG), check("Lyrics", "[00:01.00]a"))
+        assertEquals(setOf(Issue.MISSING_LYRICS_TAG), check("Karaoke", "[00:01.00]a"))
+        assertEquals(setOf(Issue.MISSING_LYRICS_TAG), check("", "plain words"))
+        assertEquals(setOf(Issue.UNDESERVED_KARAOKE_TAG), check("Lyrics; Karaoke", "plain words"))
+        assertEquals(setOf(Issue.UNDESERVED_LYRICS_TAG, Issue.UNDESERVED_KARAOKE_TAG), check("Lyrics; Karaoke", null))
+        assertEquals(setOf(Issue.UNDESERVED_LYRICS_TAG), check("lyrics", "   "))
+        assertEquals(setOf(Issue.UNDESERVED_KARAOKE_TAG), check("Lyrics; karaoke", "[00:01.00]a\n[00:00.00]b").minus(Issue.UNTIMED_LINES))
+        assertTrue(Issue.entries.filter { it.tagIssue }.none { it.warning })
+    }
+
+    @Test fun outOfOrderSkipsUntimed() {
+        assertEquals(setOf(Issue.OUT_OF_ORDER), check("Lyrics; Karaoke", "[00:05.00]a\n[00:02.00]b"))
+        assertFalse(Issue.OUT_OF_ORDER in check("Lyrics", "[00:05.00]a\n[00:00.00]b\n[00:06.00]c"))
+    }
+
+    @Test fun conflictingAndSylt() {
+        assertEquals(setOf(Issue.CONFLICTING_LEARN_TAGS), check("Learn; unsingable", null))
+        assertEquals(setOf(Issue.SYLT_ONLY), check("", null, sylt = true))
+    }
+}
+
+class LyricsFetchTest {
+    private val q = LyricsQuery("Gurenge", "LiSA", "Demon Slayer", 240_000)
+
+    @Test fun lrclibPrefersSyncedAndFallsBackToPlain() {
+        val json = """[
+          {"trackName":"Gurenge","artistName":"LiSA","duration":240.4,"plainLyrics":"a\nb","syncedLyrics":"[ar:LiSA]\n[00:01.00]a\n[00:02.00]b"},
+          {"trackName":"Gurenge","artistName":"LiSA","duration":240,"plainLyrics":"only plain","syncedLyrics":null},
+          {"trackName":"Other","artistName":"X","duration":100,"instrumental":true}
+        ]"""
+        val r = LrclibProvider.parseList(json, q)
+        assertEquals(2, r.size)
+        assertTrue(r[0].synced)
+        assertEquals("[00:01.00]a\n[00:02.00]b", r[0].text) // metadata line stripped
+        assertFalse(r[1].synced)
+        assertTrue(r[0].score > 0.9)
+        assertNull(LrclibProvider.parseTrack("""{"code":404,"name":"NotFound"}""", q))
+    }
+
+    @Test fun neteaseStripsCreditsAndMergesRomanization() {
+        val json = """{"lrc":{"lyric":"[00:00.000] 作词 : 某人\n[00:01.000] 作曲 : 某人\n[00:05.000]こんにちは\n[00:09.500]さようなら"},
+            "romalrc":{"lyric":"[00:05.000]konnichiwa\n[00:09.500]sayounara"}}"""
+        val r = NeteaseProvider.parseLyric(json, "Gurenge — LiSA", 0.9)!!
+        assertTrue(r.synced)
+        assertEquals("[00:05.000]こんにちは\n[00:09.500]さようなら", r.text)
+        assertEquals("[00:05.00]こんにちは\nkonnichiwa\n[00:09.50]さようなら\nsayounara", r.withRomanization)
+        assertTrue(Lrc.isFullyTimed(Lrc.parse(r.withRomanization!!)))
+        assertNull(NeteaseProvider.parseLyric("""{"lrc":{"lyric":"[00:00.00]纯音乐，请欣赏"}}""", "x", 1.0))
+        assertNull(NeteaseProvider.parseLyric("""{"lrc":{"lyric":""}}""", "x", 1.0))
+    }
+
+    @Test fun lyricsifyPageAndChallenge() {
+        val html = "<html><div id='lyrics'>[00:01.00]one<br/>[00:02.00]two &amp; three<br>[00:03.00]four<br>[00:04.00]five</div></html>"
+        val r = LyricsifyProvider.parseLyricsPage(html, "/lyric/lisa-gurenge.123", 1.0)!!
+        assertTrue(r.synced)
+        assertEquals("[00:01.00]one\n[00:02.00]two & three\n[00:03.00]four\n[00:04.00]five", r.text)
+        assertNull(LyricsifyProvider.parseLyricsPage("<p>no lyrics</p>", "/x", 1.0))
+        assertThrows(BlockedException::class.java) { LyricsifyProvider.checkNotChallenge(Http.Response(200, "<title>Just a moment...</title>")) }
+        val links = LyricsifyProvider.candidateLinks("""<a href="/lyric/lisa-gurenge.1">a</a><a href="/lyric/other-song.2">b</a>""", q)
+        assertEquals(listOf("/lyric/lisa-gurenge.1"), links.map { it.first })
+    }
+
+    private fun fake(name: String, vararg r: LyricsResult, fail: Boolean = false) = object : LyricsProvider {
+        override val name = name
+        override suspend fun search(q: LyricsQuery): List<LyricsResult> = if (fail) throw java.io.IOException("down") else r.toList()
+    }
+    private fun res(src: String, synced: Boolean, score: Double = 0.9) = LyricsResult(src, synced, "text $src", "", score)
+
+    @Test fun syncedBeatsPlainAcrossProviders() = runBlocking {
+        val o = LyricsFetcher.fetch(q, listOf(fake("A", res("A", false)), fake("B", res("B", true))))
+        assertEquals("B", o.result?.source)
+    }
+
+    @Test fun firstPlainWhenNothingSyncedAndFailuresAreSkipped() = runBlocking {
+        val o = LyricsFetcher.fetch(q, listOf(fake("A", fail = true), fake("B", res("B", false)), fake("C", res("C", false))))
+        assertEquals("B", o.result?.source)
+        assertEquals(1, o.errors.size)
+        assertTrue(o.errors[0].startsWith("A:"))
+    }
+
+    @Test fun lowScoresAndEmptyGiveNothing() = runBlocking {
+        val o = LyricsFetcher.fetch(q, listOf(fake("A", res("A", true, score = 0.2)), fake("B")))
+        assertNull(o.result)
+        assertTrue(o.errors.isEmpty())
+    }
+
+    @Test fun matchScoring() {
+        assertTrue(LyricsMatch.score(q, "Gurenge", "LiSA", 241_000) > 0.95)
+        assertTrue(LyricsMatch.score(q, "Gurenge (TV size)", "LiSA feat. X", null) >= LyricsMatch.MIN_SCORE)
+        assertTrue(LyricsMatch.score(q, "Completely different", "Someone", 100_000) < LyricsMatch.MIN_SCORE)
+    }
+}
+
+class ProblemLinesTest {
+    private fun l(t: Long?, text: String) = Lrc.newLine(t, text)
+
+    @Test fun findsAndCyclesProblemLines() {
+        val a = l(1000, "ok"); val b = l(null, "untimed"); val c = l(5000, "fine"); val d = l(2000, "early")
+        val e = l(6000, "odd [\uD835\uDFF6\uD835\uDFF9:00.00]"); val pause = l(null, "")
+        val lines = listOf(a, b, c, d, e, pause)
+        assertEquals(listOf(b.id to LineProblem.UNTIMED, d.id to LineProblem.OUT_OF_ORDER, e.id to LineProblem.ODD_TIMESTAMPS), Issues.lineProblems(lines))
+        assertEquals(b.id, Issues.nextProblemLine(lines, null))
+        assertEquals(d.id, Issues.nextProblemLine(lines, b.id))
+        assertEquals(b.id, Issues.nextProblemLine(lines, e.id)) // wraps
+        assertEquals(e.id, Issues.nextProblemLine(lines, a.id, LineProblem.ODD_TIMESTAMPS))
+        assertNull(Issues.nextProblemLine(listOf(a, c), null))
+    }
+}
+
+class MultiTimestampTest {
+    private fun times(l: List<Line>) = l.map { it.timeMs }
+    private fun texts(l: List<Line>) = l.map { it.text }
+
+    @Test fun repeatedLineIsSplitAndShownInTimeOrder() {
+        val src = "[00:10.00]intro\n[00:00:00] [00:50.00] [01:43:00] refrain\n[00:30.00]verse\n[02:00.00]outro"
+        val lines = Lrc.parse(src)
+        assertEquals(listOf("refrain", "intro", "verse", "refrain", "refrain", "outro"), texts(lines))
+        assertEquals(listOf<Long?>(10L, 10_000L, 30_000L, 50_000L, 103_000L, 120_000L), times(lines))
+        assertTrue(Lrc.isFullyTimed(lines))
+        assertNull(Lrc.multiTimestampProblem(src))
+    }
+
+    @Test fun continuationLinesGoToEveryCopy() {
+        val lines = Lrc.parse("[00:05.00][00:20.00]こんにちは\nkonnichiwa\n[00:10.00]bye\nbai")
+        assertEquals(listOf<Long?>(5000L, 10_000L, 20_000L), times(lines))
+        assertEquals(listOf("こんにちは\nkonnichiwa", "bye\nbai", "こんにちは\nkonnichiwa"), texts(lines))
+    }
+
+    @Test fun sortIsStableAndPausesStayBehindTheirLine() {
+        val lines = Lrc.parse("[00:20.00][00:10.00]a\n[00:10.00]b\n[00:15.00]\n[00:30.00]c")
+        assertEquals(listOf("a", "b", "", "a", "c"), texts(lines))
+        assertEquals(listOf<Long?>(10_000L, 10_000L, 15_000L, 20_000L, 30_000L), times(lines))
+    }
+
+    @Test fun serializedResultIsOrderedAndStable() {
+        val once = Lrc.serialize(Lrc.parse("[00:30.00][00:10.00]x\n[00:20.00]y"))
+        assertEquals("[00:10.00]x\n[00:20.00]y\n[00:30.00]x", once)
+        assertEquals(once, Lrc.serialize(Lrc.parse(once)))
+    }
+
+    @Test fun partlyTimedSongWithMultiTagLineIsAnError() {
+        val src = "[00:10.00][00:50.00]chorus\n[00:20.00]verse\nuntimed line before nothing"
+        // continuation text belongs to the verse, so this one is fully timed; add a real untimed entry:
+        assertNull(Lrc.multiTimestampProblem(src))
+        val bad = "plain first line\n[00:10.00][00:50.00]chorus\n[00:20.00]verse"
+        assertNotNull(Lrc.multiTimestampProblem(bad))
+        val zero = "[00:10.00]a\n[00:00.00]placeholder\n[00:20.00][00:40.00]b"
+        assertNotNull(Lrc.multiTimestampProblem(zero))
+        assertTrue(Issue.UNREADABLE_LYRICS in Issues.checkSong(listOf("Lyrics"), bad))
+        // still returns best-effort entries in file order
+        assertEquals(listOf("plain first line", "chorus", "chorus", "verse"), texts(Lrc.parse(bad)))
+    }
+
+    @Test fun singleTimestampSongsAreNeverReordered() {
+        val lines = Lrc.parse("[00:20.00]b\n[00:10.00]a")
+        assertEquals(listOf("b", "a"), texts(lines))
+        assertNull(Lrc.multiTimestampProblem("[00:20.00]b\n[00:10.00]a"))
+        assertNull(Lrc.multiTimestampProblem("just words"))
+    }
+
+    @Test fun onlyLeadingTagsAreTimes() {
+        val lines = Lrc.parse("[00:01.00]hello [00:02.00]world\n[00:05.00]end")
+        assertEquals(listOf<Long?>(1000L, 5000L), times(lines))
+        assertEquals("hello world", lines[0].text)
+        // tags are also accepted with spaces and ":" before the fraction
+        assertEquals(listOf<Long?>(1000L, 2000L), times(Lrc.parse("[00:01:00]  [00:02.00]x")))
+    }
+
+    @Test fun rawLyricsTextReadsTheStoredFrame() {
+        val audio = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0)
+        val withLyrics = Id3.embedLyrics(audio, "[00:01.00][00:02.00]x")
+        assertEquals("[00:01.00][00:02.00]x", Id3.rawLyricsText(Id3.parse(withLyrics)))
+        assertNull(Id3.rawLyricsText(Id3.parse(audio)))
+    }
+}
+
+class Id3CompatTest {
+    private val audio = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0, 1, 2, 3, 4)
+
+    private fun syncsafe(n: Int) = byteArrayOf(((n shr 21) and 0x7F).toByte(), ((n shr 14) and 0x7F).toByte(), ((n shr 7) and 0x7F).toByte(), (n and 0x7F).toByte())
+    private fun frame24(id: String, p: ByteArray) = id.toByteArray() + syncsafe(p.size) + byteArrayOf(0, 0) + p
+
+    /** A v2.4 tag: syncsafe frame sizes (one over 127 bytes, so syncsafe != plain big-endian), UTF-8 text. */
+    private fun v24File(): Pair<ByteArray, ByteArray> {
+        val long = byteArrayOf(3) + "x".repeat(200).toByteArray()
+        val body = frame24("TIT2", byteArrayOf(3) + "Söng".toByteArray()) + frame24("TXXX", long) + frame24("TIT1", byteArrayOf(3) + "Anime".toByteArray())
+        return (byteArrayOf(0x49, 0x44, 0x33, 4, 0, 0) + syncsafe(body.size) + body + audio) to long
+    }
+
+    @Test fun v24SourceKeepsFramesAndAudioWhenRewritten() {
+        val (f, long) = v24File()
+        val out = Id3.update(f, "[00:01.00]a", listOf("Anime", "Lyrics", "Karaoke"))
+        val p = Id3.parse(out)
+        assertEquals(3, out[3].toInt()) // written as v2.3
+        assertEquals(listOf("TIT2", "TXXX", "TIT1", "USLT"), p.frames.map { it.id })
+        assertArrayEquals(long, p.frames[1].data)
+        assertArrayEquals(audio, out.copyOfRange(p.audioStart, out.size))
+        val m = Id3.readMeta(out.inputStream())
+        assertEquals("Söng", m.title)
+        assertEquals(listOf("Anime", "Lyrics", "Karaoke"), Search.parseTags(m.grouping))
+        assertEquals("[00:01.00]a", m.lyricsText)
+    }
+
+    @Test fun v24MultiValueGroupingIsMergedOnRewrite() {
+        val body = frame24("TIT1", byteArrayOf(3) + "Anime\u0000Cover".toByteArray())
+        val f = byteArrayOf(0x49, 0x44, 0x33, 4, 0, 0) + syncsafe(body.size) + body + audio
+        assertEquals(listOf("Anime", "Cover"), Search.parseTags(Id3.readMeta(f.inputStream()).grouping))
+        val out = Id3.setGrouping(f, Search.withLearnState(listOf("Anime", "Cover"), LearnState.LEARN))
+        assertEquals(listOf("Anime", "Cover", "Learn"), Search.parseTags(Id3.readMeta(out.inputStream()).grouping))
+    }
+
+    @Test fun syltTimeZeroBecomesARealTime() {
+        val payload = byteArrayOf(0) + "eng".toByteArray() + byteArrayOf(2, 1, 0) +
+            "a".toByteArray() + byteArrayOf(0, 0, 0, 0, 0) + "b".toByteArray() + byteArrayOf(0, 0, 0, 0x03, 0xE8.toByte())
+        val f = byteArrayOf(0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, (payload.size + 10).toByte()) +
+            "SYLT".toByteArray() + byteArrayOf(0, 0, 0, payload.size.toByte(), 0, 0) + payload + audio
+        val lines = Id3.extractLines(Id3.parse(f))
+        assertEquals(listOf<Long?>(10L, 1000L), lines.map { it.timeMs })
+        assertTrue(Lrc.isFullyTimed(lines))
+        val m = Id3.readMeta(f.inputStream())
+        assertTrue(m.syltOnly)
+        assertEquals(LyricsState.SYNCED, m.lyrics)
+    }
+
+    @Test fun rewriteIsIdempotent() {
+        val (f, _) = v24File()
+        val once = Id3.update(f, "[00:01.00]a", listOf("Anime", "Lyrics"))
+        val twice = Id3.update(once, "[00:01.00]a", listOf("Anime", "Lyrics"))
+        assertArrayEquals(once, twice)
+    }
+}
+
+class SettingsAndIndexTest {
+    @Test fun lyricsSourceSettingsRoundTrip() {
+        val custom = listOf(SourceSetting(LyricsSource.NETEASE, true), SourceSetting(LyricsSource.LRCLIB, false), SourceSetting(LyricsSource.LYRICSIFY, true))
+        assertEquals(custom, parseSources(formatSources(custom)))
+    }
+
+    @Test fun lyricsSourceSettingsToleratesJunkAndNewSources() {
+        assertEquals(LyricsSource.entries.toList(), parseSources(null).map { it.source })
+        val p = parseSources("bogus:1,netease:0,netease:1,,lrclib")
+        assertEquals(listOf(LyricsSource.NETEASE, LyricsSource.LRCLIB, LyricsSource.LYRICSIFY), p.map { it.source })
+        assertEquals(listOf(false, true, true), p.map { it.enabled }) // missing flag = enabled, first duplicate wins
+    }
+
+    private val codec = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
+    @Test fun oldLibraryIndexStillLoads() {
+        val old = """{"root":"r","builtAt":1,"songs":[{"uri":"u","fileName":"a.mp3","title":"t","artist":"","album":"","tags":["x"],"size":1,"modified":2,"lyrics":"SYNCED"}]}"""
+        val idx = codec.decodeFromString(LibraryIndex.serializer(), old)
+        assertNull(idx.songs[0].issues) // null forces a re-read on the next scan
+        val legacy = old.replace(""""lyrics":"SYNCED"""", """"lyrics":"SYNCED","issues":["TAG_MISMATCH","UNTIMED_LINES"],"untimed":3""")
+        assertEquals(listOf(Issue.TAG_MISMATCH, Issue.UNTIMED_LINES), codec.decodeFromString(LibraryIndex.serializer(), legacy).songs[0].issues)
+    }
+
+    @Test fun searchPrefsWithNewModeRoundTrip() {
+        val p = SearchPrefs(mode = SongsMode.ATTENTION)
+        val back = codec.decodeFromString(SearchPrefs.serializer(), codec.encodeToString(SearchPrefs.serializer(), p))
+        assertEquals(SongsMode.ATTENTION, back.mode)
+    }
+}
+
+class HttpErrorTest {
+    @Test fun blockedAndOtherStatuses() {
+        Http.requireOk(Http.Response(200, ""), "x")
+        assertThrows(BlockedException::class.java) { Http.requireOk(Http.Response(403, ""), "x") }
+        assertThrows(BlockedException::class.java) { Http.requireOk(Http.Response(429, ""), "x") }
+        val e = assertThrows(java.io.IOException::class.java) { Http.requireOk(Http.Response(500, ""), "x") }
+        assertFalse(e is BlockedException)
+    }
+
+    @Test fun malformedAnswersAreIoErrorsNotCrashes() {
+        val q = LyricsQuery("a", "b", "", null)
+        assertThrows(java.io.IOException::class.java) { LrclibProvider.parseList("<html>nope</html>", q) }
+        assertNull(LrclibProvider.parseTrack("not json", q))
+        assertThrows(java.io.IOException::class.java) { NeteaseProvider.parseLyric("<html>", "x", 1.0) }
     }
 }

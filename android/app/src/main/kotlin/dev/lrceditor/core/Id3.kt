@@ -132,7 +132,11 @@ object Id3 {
         return Sylt(lang(d), fmt, type, lines)
     }
 
-    class Meta(val title: String, val artist: String, val album: String, val grouping: String, val lyrics: LyricsState)
+    /** [lyricsText] is the first non-blank USLT text (null if none); [syltOnly] = synced frame but no readable USLT. */
+    class Meta(
+        val title: String, val artist: String, val album: String, val grouping: String, val lyrics: LyricsState,
+        val lyricsText: String? = null, val syltOnly: Boolean = false,
+    )
 
     private val META_FRAMES = setOf("TIT2", "TPE1", "TALB", "TIT1", "GRP1", "USLT")
 
@@ -198,10 +202,12 @@ object Id3 {
         return metaFromFrames(frames)
     }
 
+    private fun usltTexts(frames: List<Frame>) = frames.filter { it.id == "USLT" }
+        .mapNotNull { runCatching { parseUslt(it.data).text }.getOrNull() }.filter { it.isNotBlank() }
+
     private fun lyricsState(frames: List<Frame>): LyricsState {
         if (frames.any { it.id == "SYLT" }) return LyricsState.SYNCED
-        val texts = frames.filter { it.id == "USLT" }
-            .mapNotNull { runCatching { parseUslt(it.data).text }.getOrNull() }.filter { it.isNotBlank() }
+        val texts = usltTexts(frames)
         return when {
             texts.isEmpty() -> LyricsState.NONE
             texts.any { Lrc.looksLikeLrc(it) } -> LyricsState.SYNCED
@@ -220,6 +226,8 @@ object Id3 {
             values("TALB").firstOrNull().orEmpty(),
             (values("TIT1") + values("GRP1")).joinToString(";"),
             lyricsState(frames),
+            usltTexts(frames).firstOrNull(),
+            frames.any { it.id == "SYLT" } && usltTexts(frames).isEmpty(),
         )
     }
 
@@ -227,7 +235,7 @@ object Id3 {
     fun extractLines(parsed: Parsed): List<Line> {
         parsed.frames.firstOrNull { it.id == "SYLT" }?.let { f ->
             runCatching { parseSylt(f.data) }.getOrNull()?.let { s ->
-                if (s.timestampFormat == 2 && s.lines.isNotEmpty()) return s.lines.map { Lrc.newLine(it.timeMs, it.text) }
+                if (s.timestampFormat == 2 && s.lines.isNotEmpty()) return s.lines.map { Lrc.newLine(Lrc.clampTime(it.timeMs), it.text) }
             }
         }
         parsed.frames.firstOrNull { it.id == "USLT" }?.let { f ->
@@ -237,6 +245,10 @@ object Id3 {
         }
         return emptyList()
     }
+
+    /** The text of the first non-blank USLT frame, exactly as stored. */
+    fun rawLyricsText(parsed: Parsed): String? = parsed.frames.filter { it.id == "USLT" }
+        .firstNotNullOfOrNull { f -> runCatching { parseUslt(f.data).text }.getOrNull()?.takeIf { it.isNotBlank() } }
 
     private fun frameBytes(id: String, payload: ByteArray): ByteArray {
         val out = ByteArray(10 + payload.size)
@@ -254,13 +266,36 @@ object Id3 {
         return frameBytes("USLT", payload)
     }
 
-    /** Rewrites the file with a fresh ID3v2.3 tag: all frames but USLT/SYLT kept verbatim, plus one new USLT. */
-    fun embedLyrics(file: ByteArray, lrcText: String, language: String = "und"): ByteArray {
+    /** The grouping text frame: encoding byte + text. Keeps UTF-16 if the frame had it, else ISO-8859-1 when possible. */
+    private fun groupingPayload(text: String, oldEnc: Int): ByteArray {
+        val latin1 = text.all { it.code <= 0xFF }
+        if (latin1 && oldEnc != 1 && oldEnc != 2) return byteArrayOf(0) + text.toByteArray(Charsets.ISO_8859_1)
+        return byteArrayOf(1, 0xFF.toByte(), 0xFE.toByte()) + text.toByteArray(Charset.forName("UTF-16LE"))
+    }
+
+    /**
+     * Rewrites the file with a fresh ID3v2.3 tag. All frames are kept verbatim except:
+     *  - [lrcText] != null: USLT/SYLT are replaced by one new USLT.
+     *  - [tags] != null: the grouping (TIT1 / GRP1) is set to those tags. Whichever of the two exist are rewritten;
+     *    if neither does, TIT1 is created. An empty list removes them.
+     * The audio data is copied unchanged.
+     */
+    fun update(file: ByteArray, lrcText: String?, tags: List<String>?, language: String = "und"): ByteArray {
         val parsed = parse(file)
         val audio = file.copyOfRange(parsed.audioStart, file.size)
         val frames = ByteArrayOutputStream()
-        parsed.frames.filter { it.id != "USLT" && it.id != "SYLT" }.forEach { frames.write(frameBytes(it.id, it.data)) }
-        frames.write(buildUsltFrame(lrcText, language))
+        val groupText = tags?.joinToString("; ")
+        val groupIds = parsed.frames.map { it.id }.filter { it == "TIT1" || it == "GRP1" }.toSet()
+        for (f in parsed.frames) {
+            when {
+                lrcText != null && (f.id == "USLT" || f.id == "SYLT") -> {}
+                groupText != null && (f.id == "TIT1" || f.id == "GRP1") ->
+                    if (groupText.isNotEmpty()) frames.write(frameBytes(f.id, groupingPayload(groupText, u(f.data, 0))))
+                else -> frames.write(frameBytes(f.id, f.data))
+            }
+        }
+        if (lrcText != null) frames.write(buildUsltFrame(lrcText, language))
+        if (!groupText.isNullOrEmpty() && groupIds.isEmpty()) frames.write(frameBytes("TIT1", groupingPayload(groupText, 0)))
         val body = frames.toByteArray()
 
         val out = ByteArrayOutputStream(10 + body.size + audio.size)
@@ -271,4 +306,8 @@ object Id3 {
         out.write(audio)
         return out.toByteArray()
     }
+
+    fun embedLyrics(file: ByteArray, lrcText: String, language: String = "und"): ByteArray = update(file, lrcText, null, language)
+
+    fun setGrouping(file: ByteArray, tags: List<String>): ByteArray = update(file, null, tags)
 }

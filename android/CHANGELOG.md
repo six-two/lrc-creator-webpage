@@ -2,6 +2,24 @@
 
 High-level, human-readable list of what changed in the Android app. Newest version first.
 
+## 0.0.3
+
+- Fetch lyrics: the editor can now download lyrics from LRCLIB, NetEase Cloud Music and Lyricsify (tried in the order set in Settings > Lyrics sources). Synced lyrics are preferred; plain text is used if nothing synced exists. You get a preview first and can undo. NetEase can include romanization as a second line. If a site blocks the app, "Open in browser" and "Paste from clipboard" let you bring the lyrics in by hand. The app now needs internet access for this.
+- Learning tags: every song row and the editor menu have a "Learning tag" choice (None, Learn, SingAlong, Unsingable). It writes that one tag into the file's grouping and leaves all other tags alone.
+- New Learn tab with your Learn, Unsingable and SingAlong songs, their counts, and a search box for each list.
+- Songs are now tagged automatically when lyrics are saved: "Lyrics" if the song has lyrics, "Karaoke" if every line is also timed.
+- New "Fix" list in the Library for songs with problems: untimed lines, times out of order, wrong Lyrics/Karaoke tags, more than one learning tag. "Fix tags" corrects wrong tags in bulk without opening the songs. The editor shows the same warnings for the open song.
+- Lines without a time are now saved as 00:00.00 and stay untimed when loaded again (before, they borrowed the previous line's time). Other players show such lines at the very start. A real time is never saved below 00:00.01. Exception: a 00:00.00 on the very first lyric line is read as a real time (many LRCs from the internet start that way), as long as some other line has a real time.
+- The Songs tab is now called Library. A song without lyrics no longer opens the paste dialog by itself; the editor offers "Fetch lyrics" and "Paste lyrics" buttons instead.
+- Songs with problems open on the first problem line, and tapping a warning above the editor (untimed lines, times out of order, odd timestamps) jumps to the next line with that problem.
+- Lines with several timestamps (like [00:10.00][00:50.00] chorus, common in LRCs from the internet) are split into one line per timestamp and put in time order. This only works when every line of the song has a time; otherwise the editor shows the lyrics as raw text with an explanation, and saving is blocked until you fix them. The Fix list marks such songs as "lyrics can't be read".
+- Fixed: metadata lines with brackets inside, like [ti:Song [english ver.]], were treated as untimed lyric lines.
+- The Fix list now names the exact tag problem: "Lyrics tag missing", "Karaoke tag missing", "Karaoke tag but not fully timed" or "Lyrics tag but no lyrics". "Fix tags" corrects all of them.
+- Settings shows the installed version at the bottom. Local debug builds also show when they were installed.
+- Back button: opening a song from the Library or Learn tab and pressing Back now returns to that list, with its scroll position and search kept. Back from there leaves the app.
+- Older library indexes are re-read once on the next scan to find these problems.
+- Songs whose lyrics contain timestamp-like tags written with odd Unicode digits (for example left behind by a romanization tool) are flagged as warnings. The Fix list has a new Warnings view for reviewing them, and the editor shows the same warning. Such tags are treated as plain text, never as times.
+
 ## 0.0.2
 
 - Updated and slimmed down the Github CI pipeline

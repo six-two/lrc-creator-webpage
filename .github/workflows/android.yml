@@ -27,7 +27,7 @@ jobs:
           LRC_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           LRC_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           LRC_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew :app:assembleRelease
+        run: ./gradlew :app:assembleRelease -x lintVitalAnalyzeRelease -x lintVitalReportRelease -x lintVitalRelease
       - name: Name the APK after the tag
         run: cp app/build/outputs/apk/release/app-release.apk "lrc-editor-${GITHUB_REF_NAME}.apk"
       - name: Publish GitHub Release

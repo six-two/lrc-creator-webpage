@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -23,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.lrceditor.EditorViewModel
 import dev.lrceditor.Tab
+import dev.lrceditor.core.Issue
+import dev.lrceditor.core.LearnState
 import dev.lrceditor.core.LyricsFilter
 import dev.lrceditor.core.LyricsState
 import dev.lrceditor.core.Search
@@ -45,12 +48,16 @@ fun SongsScreen(vm: EditorViewModel) {
     val recents by vm.recents.collectAsStateWithLifecycle()
     val tags by vm.tagCounts.collectAsStateWithLifecycle()
     var showAllRecents by rememberSaveable { mutableStateOf(false) }
+    // Problems need fixing; warnings (e.g. odd timestamps) are only for review.
+    val attention = remember(index) { index?.songs.orEmpty().filter { s -> s.issues.orEmpty().any { !it.warning } }.sortedWith(Search.songOrder) }
+    val warnings = remember(index) { index?.songs.orEmpty().filter { s -> s.issues.orEmpty().any { it.warning } }.sortedWith(Search.songOrder) }
+    var showWarnings by rememberSaveable { mutableStateOf(false) }
     val unknownLyrics = remember(index) { index?.songs?.count { it.lyrics == LyricsState.UNKNOWN } ?: 0 }
     @Composable fun lyricsFilter() = LyricsFilterRow(prefs.lyrics, unknownLyrics) { f -> vm.updateSearch { it.copy(lyrics = f) } }
 
     val compact = isCompactScreen()
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
-        Text("Songs", style = if (compact) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineSmall,
+        Text("Library", style = if (compact) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineSmall,
             modifier = Modifier.padding(top = if (compact) 4.dp else 8.dp))
         Text(
             when {
@@ -64,7 +71,7 @@ fun SongsScreen(vm: EditorViewModel) {
         if (scan.running) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
 
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(vertical = if (compact) 4.dp else 8.dp)) {
-            val modes = listOf(SongsMode.RECENT to "Recent", SongsMode.TITLE to "Song", SongsMode.FILENAME to "File", SongsMode.TAGS to "Tags")
+            val modes = listOf(SongsMode.RECENT to "Recent", SongsMode.ATTENTION to if (attention.size + warnings.size == 0) "Fix" else "Fix ${attention.size + warnings.size}", SongsMode.TITLE to "Song", SongsMode.FILENAME to "File", SongsMode.TAGS to "Tags")
             modes.forEachIndexed { i, (m, label) ->
                 // No check icon and a single-line label: otherwise "Recent" wraps on narrow screens and inflates the row.
                 SegmentedButton(prefs.mode == m, { vm.updateSearch { it.copy(mode = m) } },
@@ -73,7 +80,7 @@ fun SongsScreen(vm: EditorViewModel) {
         }
 
         if (settings.settings.libraryRoot == null && prefs.mode != SongsMode.RECENT) {
-            EmptyHint("Choose your music folder in Settings to search your library.") { vm.showTab(Tab.SETTINGS) }
+            EmptyHint("Choose your music folder in Settings to search your library.") { vm.navigate(Tab.SETTINGS) }
         }
 
         LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
@@ -86,6 +93,31 @@ fun SongsScreen(vm: EditorViewModel) {
                         TextButton(onClick = { showAllRecents = !showAllRecents }) {
                             Text(if (showAllRecents) "Show fewer" else "Show all (${recents.size})")
                         }
+                    }
+                }
+                SongsMode.ATTENTION -> {
+                    val list = if (showWarnings) warnings else attention
+                    item {
+                        val broken = attention.count { s -> s.issues.orEmpty().any { it.tagIssue } }
+                        Column(Modifier.padding(vertical = 8.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilterChip(!showWarnings, { showWarnings = false }, { Text("Problems ${attention.size}") })
+                                FilterChip(showWarnings, { showWarnings = true }, { Text("Warnings ${warnings.size}") })
+                            }
+                            Text(when {
+                                list.isEmpty() -> if (showWarnings) "No warnings." else "Nothing needs fixing."
+                                showWarnings -> "${list.size} song${if (list.size == 1) "" else "s"} to review: odd digits in timestamps (e.g. from a romanization tool). Tap one to open it in the editor."
+                                else -> "${list.size} song${if (list.size == 1) "" else "s"} need attention. Tap one to open it in the editor."
+                            }, color = Studio.Dim, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+                            if (!showWarnings && broken > 0) {
+                                Text("Lyrics / Karaoke tags that don't match the lyrics can be corrected without opening the songs.",
+                                    color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+                                OutlinedButton(onClick = vm::requestFixTags) { Text("Fix tags on $broken song${if (broken == 1) "" else "s"}") }
+                            }
+                        }
+                    }
+                    items(list, key = { it.uri }) { s ->
+                        SongRow(s, settings.settings, LyricsFilter.ALL, showIssues = true, onLearn = { vm.requestLearnState(s.uri, s.displayTitle, it) }) { vm.openSong(s.uri) }
                     }
                 }
                 SongsMode.TITLE -> {
@@ -127,7 +159,9 @@ private fun LazyListScope.resultItems(results: List<SongEntry>, searched: Boolea
             color = Studio.Dim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(vertical = 8.dp),
         )
     }
-    items(results, key = { it.uri }) { s -> SongRow(s, settings, lyricsFilter) { vm.openSong(s.uri) } }
+    items(results, key = { it.uri }) { s ->
+        SongRow(s, settings, lyricsFilter, onLearn = { vm.requestLearnState(s.uri, s.displayTitle, it) }) { vm.openSong(s.uri) }
+    }
 }
 
 /** Lyrics filter shared by every search page. */
@@ -204,26 +238,50 @@ private fun TagField(label: String, selected: List<String>, all: List<TagCount>,
     }
 }
 
+/** Radio group of learning states for a dropdown menu. */
 @Composable
-private fun SongRow(s: SongEntry, cfg: Settings, filter: LyricsFilter, onClick: () -> Unit) {
-    Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 8.dp, horizontal = 4.dp)) {
-        Text(s.displayTitle, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        val sub = listOf(s.artist, s.album).filter { it.isNotBlank() }.joinToString(" · ")
-        if (cfg.showArtistAlbum && sub.isNotEmpty()) Text(sub, color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
-        if (cfg.showTags && s.tags.isNotEmpty()) Text(s.tags.joinToString(" · "), color = Studio.Teal, style = MaterialTheme.typography.labelSmall)
-        // With a specific lyrics filter every row has the same state, so showing it would be noise.
-        if (cfg.showLyrics && (filter == LyricsFilter.ALL || filter == LyricsFilter.ANY)) {
-            val lyrics = when (s.lyrics) {
-                LyricsState.SYNCED -> "Synced lyrics"
-                LyricsState.UNSYNCED -> "Unsynced lyrics"
-                LyricsState.NONE -> "No lyrics"
-                LyricsState.UNKNOWN -> null
+internal fun LearnStateItems(current: LearnState, onPick: (LearnState) -> Unit) {
+    LearnState.entries.forEach { st ->
+        DropdownMenuItem(text = { Text(st.label) }, leadingIcon = { RadioButton(current == st, null) }, onClick = { onPick(st) })
+    }
+}
+
+internal fun issueLabels(s: SongEntry) = s.issues.orEmpty().map { if (it == Issue.UNTIMED_LINES) "${s.untimed} untimed" else it.label }
+
+@Composable
+internal fun SongRow(
+    s: SongEntry, cfg: Settings, filter: LyricsFilter, showIssues: Boolean = false,
+    onLearn: (LearnState) -> Unit, onClick: () -> Unit,
+) {
+    var menu by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+            Text(s.displayTitle, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val sub = listOf(s.artist, s.album).filter { it.isNotBlank() }.joinToString(" · ")
+            if (cfg.showArtistAlbum && sub.isNotEmpty()) Text(sub, color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+            if (cfg.showTags && s.tags.isNotEmpty()) Text(s.tags.joinToString(" · "), color = Studio.Teal, style = MaterialTheme.typography.labelSmall)
+            if (showIssues) Text(issueLabels(s).joinToString(" · "), color = Studio.Warn, style = MaterialTheme.typography.labelSmall)
+            // With a specific lyrics filter every row has the same state, so showing it would be noise.
+            if (cfg.showLyrics && (filter == LyricsFilter.ALL || filter == LyricsFilter.ANY)) {
+                val lyrics = when (s.lyrics) {
+                    LyricsState.SYNCED -> "Synced lyrics"
+                    LyricsState.UNSYNCED -> "Unsynced lyrics"
+                    LyricsState.NONE -> "No lyrics"
+                    LyricsState.UNKNOWN -> null
+                }
+                if (lyrics != null) Text(lyrics, color = Studio.Amber, style = MaterialTheme.typography.labelSmall)
             }
-            if (lyrics != null) Text(lyrics, color = Studio.Amber, style = MaterialTheme.typography.labelSmall)
+            // Relative path replaces the bare file name; helps tell same-named files apart.
+            if (cfg.showPath) Text(s.relPath, color = Studio.Faint, style = MaterialTheme.typography.labelSmall)
+            else if (cfg.showFileName) Text(s.fileName, color = Studio.Faint, style = MaterialTheme.typography.labelSmall)
         }
-        // Relative path replaces the bare file name; helps tell same-named files apart.
-        if (cfg.showPath) Text(s.relPath, color = Studio.Faint, style = MaterialTheme.typography.labelSmall)
-        else if (cfg.showFileName) Text(s.fileName, color = Studio.Faint, style = MaterialTheme.typography.labelSmall)
+        Box {
+            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Song options", tint = Studio.Dim) }
+            DropdownMenu(menu, { menu = false }) {
+                Text("Learning tag", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = Studio.Dim, style = MaterialTheme.typography.labelMedium)
+                LearnStateItems(Search.learnStateOf(s.tags)) { menu = false; onLearn(it) }
+            }
+        }
     }
     HorizontalDivider(color = Studio.Border.copy(alpha = 0.5f))
 }

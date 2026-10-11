@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
-enum class SongsMode { RECENT, TITLE, FILENAME, TAGS }
+enum class SongsMode { RECENT, ATTENTION, TITLE, FILENAME, TAGS }
 
 /** Everything about the last search; restored on next launch. */
 @Serializable

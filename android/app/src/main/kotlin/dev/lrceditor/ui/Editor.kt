@@ -3,6 +3,7 @@ package dev.lrceditor.ui
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -10,6 +11,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Notes
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -31,7 +35,10 @@ import androidx.compose.ui.unit.sp
 import dev.lrceditor.EditorViewModel
 import dev.lrceditor.Tab
 import dev.lrceditor.UiState
+import dev.lrceditor.core.Issue
+import dev.lrceditor.core.Issues
 import dev.lrceditor.core.Line
+import dev.lrceditor.core.LineProblem
 import dev.lrceditor.core.Lrc
 import dev.lrceditor.data.Settings
 import dev.lrceditor.data.SwipeAction
@@ -49,15 +56,16 @@ fun EditorScreen(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Unit, onSa
             Icon(Icons.Filled.GraphicEq, null, tint = Studio.Faint, modifier = Modifier.size(48.dp))
             Spacer(Modifier.height(12.dp))
             Text("No song open", style = MaterialTheme.typography.titleMedium)
-            Text("Pick one in Songs, or share an MP3 to this app.", color = Studio.Dim)
+            Text("Pick one in Library, or share an MP3 to this app.", color = Studio.Dim)
             Spacer(Modifier.height(16.dp))
-            Button(onClick = { vm.showTab(Tab.SONGS) }) { Text("Choose a song") }
+            Button(onClick = { vm.navigate(Tab.LIBRARY) }) { Text("Choose a song") }
         }
         return
     }
     Column(Modifier.fillMaxSize()) {
         EditorHeader(vm, ui, onSaveLrcAs, onSaveMp3As)
         HorizontalDivider(color = Studio.Border)
+        EditorWarnings(vm, ui)
         val listState = rememberLazyListState()
 
         // Keep the line being played in view while playing (selection never moves playback, and vice versa).
@@ -66,10 +74,28 @@ fun EditorScreen(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Unit, onSa
             if (ui.isPlaying && idx >= 0) listState.animateScrollToItem(idx)
         }
 
+        // Jumps requested by opening a song with problems or by tapping a warning.
+        LaunchedEffect(ui.scrollToId) {
+            val id = ui.scrollToId ?: return@LaunchedEffect
+            val idx = ui.lines.indexOfFirst { it.id == id }
+            if (idx >= 0) listState.animateScrollToItem(idx)
+            vm.consumeScroll()
+        }
+
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState) {
             if (ui.lines.isEmpty()) item {
-                Text("No lyrics yet. Use the lyrics button above to paste some.", color = Studio.Dim,
-                    modifier = Modifier.padding(24.dp))
+                Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (ui.rawLyrics != null) {
+                        Text(ui.lyricsError.orEmpty(), color = Studio.Danger, style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(8.dp))
+                        Button(onClick = vm::openLyricsDialog) { Text("Show lyrics as text") }
+                    } else Text("No lyrics yet.", color = Studio.Dim)
+                    Spacer(Modifier.height(12.dp))
+                    if (ui.rawLyrics == null) {
+                        Button(onClick = vm::fetchLyrics) { Icon(Icons.Filled.CloudDownload, null); Spacer(Modifier.width(8.dp)); Text("Fetch lyrics") }
+                        OutlinedButton(onClick = vm::openLyricsDialog) { Text("Paste lyrics") }
+                    }
+                }
             }
             itemsIndexed(ui.lines, key = { _, l -> l.id }) { i, line ->
                 val prevTime = ui.lines.getOrNull(i - 1)?.timeMs
@@ -94,23 +120,56 @@ private fun EditorHeader(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Un
         Box {
             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "More options") }
             DropdownMenu(menu, { menu = false }) {
-                DropdownMenuItem(text = { Text("Undo") }, leadingIcon = { Icon(Icons.Filled.Undo, null) }, enabled = ui.canUndo,
+                DropdownMenuItem(text = { Text("Undo") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Undo, null) }, enabled = ui.canUndo,
                     onClick = { menu = false; vm.undo() })
-                DropdownMenuItem(text = { Text("Redo") }, leadingIcon = { Icon(Icons.Filled.Redo, null) }, enabled = ui.canRedo,
+                DropdownMenuItem(text = { Text("Redo") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Redo, null) }, enabled = ui.canRedo,
                     onClick = { menu = false; vm.redo() })
                 DropdownMenuItem(text = { Text("Discard all changes…") }, leadingIcon = { Icon(Icons.Filled.RestartAlt, null) }, enabled = ui.dirty,
                     onClick = { menu = false; vm.requestDiscard() })
                 HorizontalDivider()
-                DropdownMenuItem(text = { Text("Import / edit lyrics text…") }, leadingIcon = { Icon(Icons.Filled.Notes, null) },
+                DropdownMenuItem(text = { Text("Fetch lyrics…") }, leadingIcon = { Icon(Icons.Filled.CloudDownload, null) },
+                    onClick = { menu = false; vm.fetchLyrics() })
+                DropdownMenuItem(text = { Text("Import / edit lyrics text…") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Notes, null) },
                     onClick = { menu = false; vm.openLyricsDialog() })
                 HorizontalDivider()
                 DropdownMenuItem(text = { Text("Save .lrc file…") }, onClick = { menu = false; onSaveLrcAs() })
                 DropdownMenuItem(text = { Text("Copy .lrc to clipboard") }, onClick = { menu = false; vm.copyLrc() })
                 DropdownMenuItem(text = { Text("Save MP3 copy as…") }, onClick = { menu = false; onSaveMp3As() })
                 HorizontalDivider()
+                Text("Learning tag", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = Studio.Dim, style = MaterialTheme.typography.labelMedium)
+                LearnStateItems(ui.learn) { state -> menu = false; vm.currentUriString()?.let { vm.requestLearnState(it, ui.fileName.orEmpty(), state) } }
+                HorizontalDivider()
                 DropdownMenuItem(text = { Text("File info") }, leadingIcon = { Icon(Icons.Filled.Info, null) },
                     onClick = { menu = false; vm.showInfo() })
             }
+        }
+    }
+}
+
+/** Problems with the lyrics being edited. Those that sit on a line can be tapped to jump to the next such line. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun EditorWarnings(vm: EditorViewModel, ui: UiState) {
+    val problems = remember(ui.lines) { Issues.lineProblems(ui.lines) }
+    fun count(k: LineProblem) = problems.count { it.second == k }
+    val untimed = count(LineProblem.UNTIMED)
+    val conflict = Issue.CONFLICTING_LEARN_TAGS in Issues.checkSong(ui.tags, null)
+    // label, what to jump to (null = not tied to a line)
+    val parts = listOfNotNull(
+        ("$untimed untimed line${if (untimed == 1) "" else "s"}" to LineProblem.UNTIMED).takeIf { untimed > 0 },
+        ("times out of order" to LineProblem.OUT_OF_ORDER).takeIf { count(LineProblem.OUT_OF_ORDER) > 0 },
+        ("odd timestamps in text" to LineProblem.ODD_TIMESTAMPS).takeIf { count(LineProblem.ODD_TIMESTAMPS) > 0 },
+    )
+    if (parts.isEmpty() && !conflict) return
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Filled.Warning, null, tint = Studio.Warn, modifier = Modifier.size(14.dp))
+        FlowRow(Modifier.padding(start = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            parts.forEach { (label, kind) ->
+                Text("$label ›", color = Studio.Warn, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable { vm.jumpToProblem(kind) }.padding(vertical = 6.dp))
+            }
+            if (conflict) Text("more than one learning tag", color = Studio.Warn, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(vertical = 6.dp))
         }
     }
 }

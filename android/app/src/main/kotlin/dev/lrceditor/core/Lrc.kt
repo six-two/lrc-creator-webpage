@@ -9,8 +9,10 @@ object Lrc {
     private val ids = AtomicLong(1)
     fun newLine(timeMs: Long?, text: String) = Line(ids.getAndIncrement(), timeMs, text)
 
-    private val TAG_RE = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?]""")
-    private val TIME_INPUT_RE = Regex("""^(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?$""")
+    private val TAG_RE = Regex("""\[([0-9]{1,3}):([0-9]{2})(?:[.:]([0-9]{1,3}))?]""")
+    private val TIME_INPUT_RE = Regex("""^([0-9]{1,3}):([0-9]{1,2})(?:[.:]([0-9]{1,3}))?$""")
+    /** ID tag lines like [ar:Artist], [al: Album], [offset:0], [ti:Song [english ver.]] (brackets may be nested): not lyrics, and not timestamps (those start with digits). */
+    val METADATA_RE = Regex("""^\s*\[[A-Za-z]{1,12}\s*:.*]\s*$""")
     private val NEWLINE_RE = Regex("""\r\n|\r|\n""")
 
     /** m:ss.t (tenths) for small screens, or -:--.- for null. */
@@ -53,31 +55,54 @@ object Lrc {
         return TimeInput.Ok(mins * 60_000 + secs * 1000 + fracToMs(frac))
     }
 
+    private val LOOKALIKE_RE = Regex("""\[\p{Nd}{1,3}:\p{Nd}{2}(?:[.:]\p{Nd}{1,3})?]""")
+
+    /** Timestamp-looking tags written with non-ASCII digits (e.g. 𝟶𝟹:𝟶𝟸). They are not timestamps here; they stay as plain text. */
+    fun hasOddTimestamps(text: String) = LOOKALIKE_RE.findAll(text).any { m -> m.value.any { it.code > 127 } || m.value.codePoints().anyMatch { it > 127 } }
+
     fun looksLikeLrc(text: String) = TAG_RE.containsMatchIn(text)
 
-    /**
-     * Untagged lines following a tagged line are continuation lines of that entry (joined by '\n').
-     * Untagged lines before any tag become untimed entries.
-     */
-    fun parse(text: String): List<Line> {
+    /** Smallest real timestamp. An exact 00:00.00 in a file means "untimed", so a real time is never below this. */
+    const val MIN_TIME_MS = 10L
+
+    fun clampTime(ms: Long): Long = maxOf(ms, MIN_TIME_MS)
+
+
+    private val LEADING_TAGS_RE = Regex("""^\s*((?:\[[0-9]{1,3}:[0-9]{2}(?:[.:][0-9]{1,3})?]\s*)+)""")
+
+    private fun tagMs(m: MatchResult) =
+        m.groupValues[1].toLong() * 60_000 + m.groupValues[2].toLong() * 1000 + fracToMs(m.groups[3]?.value)
+
+    private class Parsed(val entries: List<Line>, val multiTag: Boolean)
+
+    private fun parseEntries(text: String): Parsed {
         val out = mutableListOf<Line>()
         val raw = text.split(NEWLINE_RE).toMutableList()
         while (raw.isNotEmpty() && raw.last().isBlank()) raw.removeAt(raw.size - 1)
 
-        var curTime: Long? = null
+        var curTimes: List<Long> = emptyList()
         var curLines: MutableList<String>? = null
-        fun flush() { curLines?.let { out += newLine(curTime, it.joinToString("\n")) } }
+        var multi = false
+        // One entry per timestamp, all sharing the text (and continuation lines) of their source line.
+        fun flush() {
+            curLines?.let { ls ->
+                val t = ls.joinToString("\n")
+                // This app never writes several timestamps on one line, so a 00:00.00 there is a real time, not "untimed".
+                val multiLine = curTimes.size > 1
+                curTimes.forEach { out += newLine(if (multiLine && it == 0L) MIN_TIME_MS else it, t) }
+            }
+        }
 
         for (line in raw) {
-            val tags = TAG_RE.findAll(line).map {
-                it.groupValues[1].toLong() * 60_000 + it.groupValues[2].toLong() * 1000 + fracToMs(it.groups[3]?.value)
-            }.toList()
+            if (METADATA_RE.matches(line)) continue
+            // Timestamps in front of the text are the line's times; a tag elsewhere only counts if there is none in front.
+            val lead = LEADING_TAGS_RE.find(line)
+            val tags = (if (lead != null) TAG_RE.findAll(lead.groupValues[1]) else TAG_RE.findAll(line)).map(::tagMs).toList()
             if (tags.isNotEmpty()) {
                 flush()
-                val content = TAG_RE.replace(line, "").trim()
-                for (i in 0 until tags.size - 1) out += newLine(tags[i], content)
-                curTime = tags.last()
-                curLines = mutableListOf(content)
+                if (tags.size > 1) multi = true
+                curTimes = tags
+                curLines = mutableListOf(TAG_RE.replace(line, "").trim())
             } else if (curLines != null) {
                 curLines.add(line)
             } else {
@@ -85,7 +110,52 @@ object Lrc {
             }
         }
         flush()
-        return out
+        return Parsed(resolveZeroTimes(out), multi)
+    }
+
+    /** Stable sort by time; entries without a time (pauses) stay behind the entry before them. */
+    private fun sortByTime(entries: List<Line>): List<Line> {
+        var key = 0L
+        return entries.map { l -> (l.timeMs?.also { key = it } ?: key) to l }.sortedBy { it.first }.map { it.second }
+    }
+
+    /**
+     * Untagged lines following a tagged line are continuation lines of that entry (joined by '\n').
+     * Metadata lines ([ar:..], [al:..]) are skipped. Untagged lines before any tag become untimed entries, and so do entries tagged exactly 00:00.00
+     * (that is how untimed entries are written, see [resolveExportTimestamps] and [resolveZeroTimes]).
+     *
+     * A line with several timestamps ("[00:10.00][00:50.00]chorus") becomes one entry per timestamp. In a fully timed
+     * song those are put in time order. In a partly timed song that can't be done sensibly: see [multiTimestampProblem]
+     * (the entries are then still returned, in file order).
+     */
+    fun parse(text: String): List<Line> {
+        val p = parseEntries(text)
+        return if (p.multiTag && isFullyTimed(p.entries)) sortByTime(p.entries) else p.entries
+    }
+
+    /** Null if [text] can be read; otherwise why not (several timestamps per line in a song that isn't fully timed). */
+    fun multiTimestampProblem(text: String): String? {
+        if (!looksLikeLrc(text)) return null
+        val p = parseEntries(text)
+        return if (p.multiTag && !isFullyTimed(p.entries))
+            "Some lines have several timestamps (like [00:10.00][00:50.00]chorus). That can only be read when every line of the song has a time, and here some don't."
+        else null
+    }
+
+    /**
+     * An exact 00:00.00 is how an untimed entry is saved, so it normally reads back as untimed. Exception: LRCs from
+     * elsewhere often start the first lyric line at 00:00.00. That one counts as a real time (kept as [MIN_TIME_MS])
+     * when some other entry has a real time; otherwise the whole file is just unfinished and stays untimed.
+     */
+    private fun resolveZeroTimes(entries: List<Line>): List<Line> {
+        if (entries.none { it.timeMs == 0L }) return entries
+        val first = entries.indexOfFirst { it.text.isNotBlank() }
+        val anyReal = entries.any { (it.timeMs ?: 0L) > 0L }
+        return entries.mapIndexed { i, l ->
+            if (l.timeMs != 0L) l
+            else if (i == first && anyReal) l.copy(timeMs = MIN_TIME_MS)
+            else l.copy(timeMs = null)
+        }
     }
 
     /** Plain lyrics import: every non-blank line becomes its own untimed entry. */
@@ -95,17 +165,19 @@ object Lrc {
     /** Parse either LRC or plain text depending on whether any tag is present. */
     fun parseAny(text: String): List<Line> = if (looksLikeLrc(text)) parse(text) else plainTextToLines(text)
 
-    /** Untimed lines get the nearest preceding timestamp (0 if none) so nothing is dropped on export. */
-    fun resolveExportTimestamps(lines: List<Line>): List<Pair<Long, String>> {
-        var last = 0L
-        return lines.map { l ->
-            val t = l.timeMs ?: last
-            last = t
-            t to l.text
-        }
-    }
+    /** Untimed entries are written as 00:00.00 (read back as untimed); real times are at least [MIN_TIME_MS]. */
+    fun resolveExportTimestamps(lines: List<Line>): List<Pair<Long, String>> =
+        lines.map { l -> (l.timeMs?.let(::clampTime) ?: 0L) to l.text }
 
     fun countPlaceholders(lines: List<Line>) = lines.count { it.timeMs == null }
+
+    /** Entries with text but no time. Blank pause entries and continuation (romanization) lines don't count. */
+    fun countUntimed(lines: List<Line>) = lines.count { it.timeMs == null && it.text.isNotBlank() }
+
+    fun hasLyrics(lines: List<Line>) = lines.any { it.text.isNotBlank() }
+
+    /** True when every entry with text has a time. */
+    fun isFullyTimed(lines: List<Line>) = countUntimed(lines) == 0
 
     fun serialize(lines: List<Line>): String =
         resolveExportTimestamps(lines).joinToString("\n") { (t, text) -> "[${formatTime(t)}]$text" }

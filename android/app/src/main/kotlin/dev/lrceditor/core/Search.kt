@@ -24,6 +24,15 @@ enum class LyricsFilter(val label: String) {
     }
 }
 
+/** The learning state of a song, stored as one reserved tag in the grouping. At most one applies. */
+enum class LearnState(val tag: String?, val label: String) {
+    NONE(null, "None"), LEARN("Learn", "Learn"), SING_ALONG("SingAlong", "SingAlong"), UNSINGABLE("Unsingable", "Unsingable");
+
+    companion object {
+        val tags = entries.mapNotNull { it.tag }
+    }
+}
+
 object Search {
     fun tagKey(tag: String) = tag.trim().lowercase()
 
@@ -113,5 +122,34 @@ object Search {
             prev = cur
         }
         return best
+    }
+
+    private const val TAG_LYRICS = "Lyrics"
+    private const val TAG_KARAOKE = "Karaoke"
+
+    /** The first learning state found in [tags] (case-insensitive), or NONE. */
+    fun learnStateOf(tags: List<String>): LearnState {
+        val keys = tags.map(::tagKey).toSet()
+        return LearnState.entries.firstOrNull { it.tag != null && tagKey(it.tag) in keys } ?: LearnState.NONE
+    }
+
+    /** Drops the [reserved] tags (case-insensitive) that are not in [want], and appends missing ones. Other tags keep their order. */
+    private fun replaceReserved(tags: List<String>, reserved: List<String>, want: List<String>): List<String> {
+        val res = reserved.map(::tagKey).toSet()
+        val wanted = want.map(::tagKey).toSet()
+        val kept = tags.filter { tagKey(it) !in res || tagKey(it) in wanted }
+        val have = kept.map(::tagKey).toSet()
+        return kept + want.filter { tagKey(it) !in have }
+    }
+
+    /** Swaps the learning tag: removes the other learning tags in any case and adds the chosen one. */
+    fun withLearnState(tags: List<String>, state: LearnState): List<String> =
+        replaceReserved(tags, LearnState.tags, listOfNotNull(state.tag))
+
+    /** `Lyrics` iff there is any non-blank lyric, `Karaoke` iff every text entry is also timed. Other tags are untouched. */
+    fun withLyricsTags(tags: List<String>, lines: List<Line>): List<String> {
+        val has = Lrc.hasLyrics(lines)
+        return replaceReserved(tags, listOf(TAG_LYRICS, TAG_KARAOKE),
+            listOfNotNull(TAG_LYRICS.takeIf { has }, TAG_KARAOKE.takeIf { has && Lrc.isFullyTimed(lines) }))
     }
 }

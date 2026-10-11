@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.net.Uri
+import androidx.core.net.toUri
 import android.provider.OpenableColumns
 import android.content.Intent
 import android.graphics.Bitmap
@@ -19,6 +20,10 @@ import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import dev.lrceditor.core.DocPath
 import dev.lrceditor.core.Id3
+import dev.lrceditor.core.Issue
+import dev.lrceditor.core.Issues
+import dev.lrceditor.core.LearnState
+import dev.lrceditor.core.LineProblem
 import dev.lrceditor.core.Line
 import dev.lrceditor.core.Lrc
 import dev.lrceditor.core.LyricsFilter
@@ -27,12 +32,29 @@ import dev.lrceditor.core.NameField
 import dev.lrceditor.core.Search
 import dev.lrceditor.core.TagCount
 import dev.lrceditor.data.*
+import dev.lrceditor.data.lyrics.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
 enum class ExportKind { LRC, MP3 }
 
-enum class Tab { SONGS, EDITOR, SETTINGS }
+enum class Tab { LIBRARY, LEARN, EDITOR, SETTINGS }
+
+/** State of the "fetch lyrics" dialog. */
+sealed interface FetchState {
+    data object Loading : FetchState
+    data class Found(val result: LyricsResult, val useRomanization: Boolean = false) : FetchState {
+        val text get() = if (useRomanization) result.withRomanization ?: result.text else result.text
+    }
+    /** Nothing usable; the dialog then offers the browser and clipboard routes. */
+    data class Failed(val message: String) : FetchState
+}
+
+/** A tag rewrite that waits for the "overwrite the original file?" confirmation. */
+sealed interface TagAction {
+    data class SetLearn(val uri: String, val name: String, val state: LearnState) : TagAction
+    data class FixAll(val count: Int) : TagAction
+}
 
 /** Technical details of the open MP3, shown by the info dialog. */
 data class FileInfo(
@@ -60,17 +82,32 @@ data class UiState(
     val durationMs: Long = 0,
     val settings: Settings = Settings(),
     val showLyricsDialog: Boolean = false,
-    val tab: Tab = Tab.SONGS,
+    val tab: Tab = Tab.LIBRARY,
     /** A file was shared in while unsaved work is open; waiting for the user to confirm replacing it. */
     val pendingOpen: Uri? = null,
     val busy: Boolean = false,
     val confirmSave: Boolean = false,
     val confirmDiscard: Boolean = false,
     val info: FileInfo? = null,
-)
+    /** Grouping tags of the open file as last read or written. */
+    val tags: List<String> = emptyList(),
+    val fetch: FetchState? = null,
+    val pendingTag: TagAction? = null,
+    /** There is a screen to go back to (see [EditorViewModel.back]). */
+    val canGoBack: Boolean = false,
+    /** The editor should scroll this line into view, then call [EditorViewModel.consumeScroll]. */
+    val scrollToId: Long? = null,
+    /** Lyrics of the open file that exist but can't be read, shown raw for fixing; saving is blocked meanwhile. */
+    val rawLyrics: String? = null,
+    val lyricsError: String? = null,
+) {
+    val learn get() = Search.learnStateOf(tags)
+}
 
 private const val MAX_UNDO = 100
 
+@OptIn(kotlinx.coroutines.FlowPreview::class)
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
     // Declared first: init blocks below restore a session, which resets these.
     private val undoStack = ArrayDeque<List<Line>>()
@@ -107,10 +144,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 SongsMode.TITLE -> p.query.isNotBlank()
                 SongsMode.FILENAME -> p.fileQuery.isNotBlank()
                 SongsMode.TAGS -> p.include.isNotEmpty() || p.exclude.isNotEmpty()
-                SongsMode.RECENT -> false
+                SongsMode.RECENT, SongsMode.ATTENTION -> false
             }
             val base = when {
-                p.mode == SongsMode.RECENT -> emptyList()
+                p.mode == SongsMode.RECENT || p.mode == SongsMode.ATTENTION -> emptyList()
                 // No text/tag query: a lyrics filter alone lists every song with that lyric state.
                 !queryActive -> if (p.lyrics != LyricsFilter.ALL) songs.sortedWith(Search.songOrder) else emptyList()
                 p.mode == SongsMode.TITLE -> Search.byName(songs, p.query, NameField.TITLE, p.fuzzy)
@@ -186,6 +223,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------------------------------------------------------- loading
 
+    /** (raw text, reason) if the file has lyrics that can't be read into lines; null if they are fine or absent. */
+    private fun unreadableLyrics(bytes: ByteArray): Pair<String, String>? {
+        val parsed = Id3.parse(bytes)
+        if (parsed.frames.any { it.id == "SYLT" }) return null // those are what gets loaded
+        val raw = Id3.rawLyricsText(parsed) ?: return null
+        return Lrc.multiTimestampProblem(raw)?.let { raw to it }
+    }
+
+    private fun showUnreadable(bad: Pair<String, String>) =
+        _ui.update { it.copy(rawLyrics = bad.first, lyricsError = bad.second, showLyricsDialog = true) }
+
     private fun restoreSession() {
         val (saved, lines) = sessions.load() ?: return
         currentUri = saved.uri
@@ -197,13 +245,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             else -> runCatching { Id3.extractLines(Id3.parse(sessions.audioFile.readBytes())) }.getOrDefault(emptyList())
         }
         _ui.update { it.copy(tab = Tab.EDITOR) }
+        if (lines.isEmpty() && !saved.dirty) runCatching { unreadableLyrics(sessions.audioFile.readBytes()) }.getOrNull()?.let { bad ->
+            _ui.update { it.copy(rawLyrics = bad.first, lyricsError = bad.second) }
+        }
         _messages.tryEmit("Session restored")
     }
 
     /** Entry point for share / "open with" intents. */
     fun openUri(uri: Uri) {
         val s = _ui.value
-        if (s.loaded && uri.toString() == currentUri) { showTab(Tab.EDITOR); return } // already open
+        if (s.loaded && uri.toString() == currentUri) { navigate(Tab.EDITOR); return } // already open
         if (s.loaded && s.dirty) _ui.update { it.copy(pendingOpen = uri) } else loadUri(uri)
     }
 
@@ -219,7 +270,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _ui.update { it.copy(busy = true) }
             val result = withContext(Dispatchers.IO) {
-                runCatching {
+                runCatching<Triple<String, List<Line>, Pair<String, String>?>?> {
                     val resolver = getApplication<Application>().contentResolver
                     val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
                         if (it.moveToFirst()) it.getString(0) else null
@@ -227,7 +278,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Could not open file")
                     if (!Lrc.looksLikeMp3(bytes)) return@runCatching null
                     sessions.audioFile.writeBytes(bytes)
-                    name to Id3.extractLines(Id3.parse(bytes))
+                    val bad = unreadableLyrics(bytes)
+                    Triple(name, if (bad != null) emptyList() else Id3.extractLines(Id3.parse(bytes)), bad)
                 }
             }
             _ui.update { it.copy(busy = false) }
@@ -237,16 +289,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     _messages.tryEmit("That doesn't look like a valid MP3 file — no MP3 header found.")
                     return@onSuccess
                 }
-                val (name, lines) = r
+                val (name, lines, bad) = r
                 currentUri = uri.toString()
                 val entry = library.index.value?.songs?.firstOrNull { it.uri == currentUri }
                 recentsStore.touch(Recent(currentUri!!, name, entry?.title.orEmpty(), entry?.artist.orEmpty(), System.currentTimeMillis()))
                 activate(name, lines, dirty = false)
                 baseline = lines
-                _ui.update { it.copy(tab = Tab.EDITOR) }
+                // A song with a problem opens on the first problem line.
+                Issues.nextProblemLine(lines, null)?.let { id -> _ui.update { it.copy(selectedId = id, scrollToId = id) } }
+                navigate(Tab.EDITOR)
+                if (bad != null) showUnreadable(bad)
                 scheduleSave()
-                _messages.tryEmit(if (lines.isEmpty()) "No existing lyrics found — starting blank" else "Loaded existing lyrics from the file")
-                if (lines.isEmpty()) _ui.update { it.copy(showLyricsDialog = true) }
+                _messages.tryEmit(when {
+                    bad != null -> "The lyrics in this file can't be read — see the message"
+                    lines.isEmpty() -> "No existing lyrics found — fetch or paste some"
+                    else -> "Loaded existing lyrics from the file"
+                })
             }
         }
     }
@@ -256,13 +314,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update {
             it.copy(loaded = true, fileName = name, lines = lines, selectedId = lines.firstOrNull()?.id,
                 playingId = null, editingTextId = null, editingTimeId = null, dirty = dirty, speed = 1f,
-                canUndo = false, canRedo = false)
+                canUndo = false, canRedo = false, tags = sessionTags(), fetch = null, rawLyrics = null, lyricsError = null)
         }
         player.setMediaItem(MediaItem.fromUri(Uri.fromFile(sessions.audioFile)))
         player.setPlaybackParameters(PlaybackParameters(1f))
         player.prepare()
         lastTickPos = -1
     }
+
+    /** Grouping tags of the working copy of the open file. */
+    private fun sessionTags(): List<String> =
+        runCatching { Search.parseTags(sessions.audioFile.inputStream().use { Id3.readMeta(it) }.grouping) }.getOrDefault(emptyList())
 
     // ---------------------------------------------------------------- line editing
 
@@ -316,6 +378,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Selects and scrolls to the next line with a problem (of [kind], or any), wrapping around. */
+    fun jumpToProblem(kind: LineProblem?) {
+        val s = _ui.value
+        val id = Issues.nextProblemLine(s.lines, s.selectedId, kind) ?: return
+        _ui.update { it.copy(selectedId = id, scrollToId = id) }
+    }
+
+    fun consumeScroll() = _ui.update { it.copy(scrollToId = null) }
+
     fun select(id: Long) = _ui.update { it.copy(selectedId = id) }
 
     fun moveSelection(delta: Int) {
@@ -327,7 +398,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun nudge(id: Long, deltaMs: Long) = mutateLines { ls ->
-        ls.map { if (it.id == id) it.copy(timeMs = maxOf(0, (it.timeMs ?: 0) + deltaMs)) else it }
+        ls.map { if (it.id == id) it.copy(timeMs = Lrc.clampTime((it.timeMs ?: 0) + deltaMs)) else it }
     }
 
     fun nudgeSelected(sign: Int) {
@@ -349,7 +420,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val s = _ui.value
         val id = s.selectedId ?: return run { _messages.tryEmit("Select a line first") }
         val now = player.currentPosition
-        mutateLines { ls -> ls.map { if (it.id == id) it.copy(timeMs = now) else it } }
+        mutateLines { ls -> ls.map { if (it.id == id) it.copy(timeMs = Lrc.clampTime(now)) else it } }
         if (s.settings.autoAdvance) {
             val idx = s.lines.indexOfFirst { it.id == id }
             s.lines.getOrNull(idx + 1)?.let { select(it.id) }
@@ -361,13 +432,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         mutateLines { ls -> ls.map { if (it.id == id) it.copy(timeMs = null) else it } }
     }
 
-    fun setTime(id: Long, ms: Long?) = mutateLines { ls -> ls.map { if (it.id == id) it.copy(timeMs = ms) else it } }
+    fun setTime(id: Long, ms: Long?) = mutateLines { ls -> ls.map { if (it.id == id) it.copy(timeMs = ms?.let(Lrc::clampTime)) else it } }
     fun setText(id: Long, text: String) = mutateLines { ls -> ls.map { if (it.id == id) it.copy(text = text) else it } }
 
     /** Inserts an empty ("pause") line at the playhead. Position rule depends on the auto-advance setting (spec §6). */
     fun insertPauseLine() {
         val s = _ui.value
-        val line = Lrc.newLine(player.currentPosition, "")
+        val line = Lrc.newLine(Lrc.clampTime(player.currentPosition), "")
         val sel = s.lines.indexOfFirst { it.id == s.selectedId }
         val isLast = sel != -1 && sel == s.lines.lastIndex
         var at = s.lines.size
@@ -382,11 +453,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun startEditText(id: Long?) = _ui.update { it.copy(editingTextId = id) }
     fun startEditTime(id: Long?) = _ui.update { it.copy(editingTimeId = id) }
 
-    fun replaceAllLyrics(text: String) {
+    /** Returns false (and keeps the dialog open with the reason) if the text can't be read into lines. */
+    fun replaceAllLyrics(text: String): Boolean {
+        Lrc.multiTimestampProblem(text)?.let { problem ->
+            _ui.update { it.copy(rawLyrics = text, lyricsError = problem, showLyricsDialog = true) }
+            return false
+        }
         val lines = Lrc.parseAny(text)
-        _ui.update { it.copy(selectedId = lines.firstOrNull()?.id, playingId = null, editingTextId = null, editingTimeId = null) }
+        _ui.update { it.copy(selectedId = lines.firstOrNull()?.id, playingId = null, editingTextId = null, editingTimeId = null,
+            rawLyrics = null, lyricsError = null) }
         mutateLines { lines }
         closeLyricsDialog()
+        return true
     }
 
     fun currentLrc(): String = Lrc.serialize(_ui.value.lines)
@@ -451,7 +529,30 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openLyricsDialog() = _ui.update { it.copy(showLyricsDialog = true) }
     fun closeLyricsDialog() = _ui.update { it.copy(showLyricsDialog = false) }
-    fun showTab(tab: Tab) = _ui.update { it.copy(tab = tab) }
+    /** Where Back goes: the screens we came from, most recent last. */
+    private val tabStack = ArrayDeque<Tab>()
+
+    /** Tab bar tap. Starts a fresh trail, except that leaving the editor lets Back return to it. */
+    fun showTab(tab: Tab) {
+        val from = _ui.value.tab
+        tabStack.clear()
+        if (from == Tab.EDITOR && tab != Tab.EDITOR) tabStack.addLast(Tab.EDITOR)
+        _ui.update { it.copy(tab = tab, canGoBack = tabStack.isNotEmpty()) }
+    }
+
+    /** Moves to [tab] from inside the app (e.g. opening a song) so that Back returns to where you were. */
+    fun navigate(tab: Tab) {
+        val from = _ui.value.tab
+        if (tab == from) return
+        if (tabStack.lastOrNull() == tab) tabStack.removeLast() else tabStack.addLast(from)
+        while (tabStack.size > 8) tabStack.removeFirst()
+        _ui.update { it.copy(tab = tab, canGoBack = tabStack.isNotEmpty()) }
+    }
+
+    fun back() {
+        val to = tabStack.removeLastOrNull() ?: return
+        _ui.update { it.copy(tab = to, canGoBack = tabStack.isNotEmpty()) }
+    }
 
     fun updateSettings(s: Settings) {
         _ui.update { it.copy(settings = s) }
@@ -465,7 +566,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         val old = _ui.value.settings.libraryRoot
         if (old != null && old != uri.toString()) {
-            runCatching { resolver.releasePersistableUriPermission(Uri.parse(old), Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+            runCatching { resolver.releasePersistableUriPermission(old.toUri(), Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         }
         updateSettings(_ui.value.settings.copy(libraryRoot = uri.toString()))
         rescan()
@@ -476,14 +577,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             if (library.scan.value.running) return@launch
             runCatching { library.runScan(root, full, _ui.value.settings.ignoredFolders, _ui.value.settings.ignoredFiles) }
-                .onSuccess { _messages.tryEmit("Library indexed: ${library.index.value?.songs?.size ?: 0} songs") }
-                .onFailure { _messages.tryEmit("Scan failed: ${it.message}") }
+                .onSuccess {
+                    val skipped = library.skippedFolders
+                    _messages.tryEmit("Library indexed: ${library.index.value?.songs?.size ?: 0} songs" +
+                        if (skipped > 0) " ($skipped folder${if (skipped == 1) "" else "s"} could not be read — rescan to retry)" else "")
+                }
+                .onFailure { android.util.Log.e("LibraryScan", "Scan failed", it); _messages.tryEmit("Scan failed: ${it.javaClass.simpleName}: ${it.message}") }
         }
     }
 
     fun updateSearch(f: (SearchPrefs) -> SearchPrefs) = _search.update(f)
 
-    fun openSong(uriString: String) = openUri(Uri.parse(uriString))
+    fun openSong(uriString: String) = openUri(uriString.toUri())
+
+    fun currentUriString(): String? = currentUri
 
     fun removeRecent(uri: String) = recentsStore.remove(uri)
 
@@ -545,7 +652,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Save button: embeds the lyrics into the original MP3 (after asking, if enabled). */
     fun requestSave() {
         if (!_ui.value.loaded) return
+        if (blockedByUnreadable()) return
         if (_ui.value.settings.confirmOverwrite) _ui.update { it.copy(confirmSave = true) } else saveToOriginal()
+    }
+
+    /** Saving now would overwrite lyrics that were never loaded. */
+    private fun blockedByUnreadable(): Boolean {
+        if (_ui.value.rawLyrics == null) return false
+        _messages.tryEmit("The file's lyrics couldn't be read, so nothing is saved. Fix them in \"Import / edit lyrics text\" first.")
+        return true
     }
 
     fun requestDiscard() = _ui.update { it.copy(confirmDiscard = true) }
@@ -571,24 +686,38 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         saveToOriginal()
     }
 
-    /** Writes straight into the original file. Falls back to the "save as" picker if we have no write access. */
+    /** Tags with Lyrics/Karaoke recomputed for [lines], starting from the grouping of [file]. */
+    private fun tagsFor(file: ByteArray, lines: List<Line>): List<String> =
+        Search.withLyricsTags(Search.parseTags(Id3.readMeta(file.inputStream()).grouping), lines)
+
+    /**
+     * Writes straight into the original file (lyrics and the matching Lyrics/Karaoke tags in one rewrite).
+     * Falls back to the "save as" picker if we have no write access.
+     */
     private fun saveToOriginal() {
         val uriString = currentUri ?: return run { _saveAs.tryEmit(ExportKind.MP3) }
-        val uri = Uri.parse(uriString)
+        val uri = uriString.toUri()
+        val lines = _ui.value.lines
         val text = currentLrc()
         val note = exportNote()
-        val state = if (_ui.value.lines.any { it.text.isNotBlank() }) LyricsState.SYNCED else LyricsState.NONE
         viewModelScope.launch {
             val r = withContext(Dispatchers.IO) {
                 runCatching {
-                    val bytes = Id3.embedLyrics(sessions.audioFile.readBytes(), text)
+                    val src = sessions.audioFile.readBytes()
+                    val tags = tagsFor(src, lines)
+                    val bytes = Id3.update(src, text, tags)
                     val out = getApplication<Application>().contentResolver.openOutputStream(uri, "wt") ?: error("no output stream")
                     out.use { it.write(bytes) }
+                    tags
                 }
             }
-            r.onSuccess {
+            r.onSuccess { tags ->
                 markClean()
-                library.setLyrics(uriString, state)
+                val lyrics = if (Lrc.hasLyrics(lines)) LyricsState.SYNCED else LyricsState.NONE
+                library.updateEntry(uriString) {
+                    it.copy(tags = tags, lyrics = lyrics, issues = Issues.checkSong(tags, text).toList(), untimed = Lrc.countUntimed(lines))
+                }
+                _ui.update { it.copy(tags = tags) }
                 _messages.tryEmit("Saved lyrics into ${_ui.value.fileName}$note")
             }
             r.onFailure {
@@ -605,7 +734,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun exportNote(): String {
         val n = Lrc.countPlaceholders(_ui.value.lines)
-        return if (n > 0) " ($n line${if (n == 1) "" else "s"} used a placeholder timestamp)" else ""
+        return if (n > 0) " ($n line${if (n == 1) "" else "s"} saved without a time, as 00:00.00)" else ""
     }
 
     private fun markClean() {
@@ -622,19 +751,186 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun writeExport(kind: ExportKind, uri: Uri) {
+        if (kind == ExportKind.MP3 && blockedByUnreadable()) return
+        val lines = _ui.value.lines
         val text = currentLrc()
         val note = exportNote()
         viewModelScope.launch {
             val r = withContext(Dispatchers.IO) {
                 runCatching {
                     val bytes = if (kind == ExportKind.LRC) text.toByteArray(Charsets.UTF_8)
-                    else Id3.embedLyrics(sessions.audioFile.readBytes(), text)
+                    else sessions.audioFile.readBytes().let { src -> Id3.update(src, text, tagsFor(src, lines)) }
                     getApplication<Application>().contentResolver.openOutputStream(uri, "wt")!!.use { it.write(bytes) }
                 }
             }
             r.onSuccess { markClean(); _messages.tryEmit((if (kind == ExportKind.LRC) "Saved .lrc" else "Saved .mp3 with embedded lyrics") + note) }
             r.onFailure { _messages.tryEmit("Export failed: ${it.message}") }
         }
+    }
+
+    // ---------------------------------------------------------------- learning tags & fixes
+
+    /** Asks first when "ask before overwriting" is on, since this rewrites the song's file. */
+    fun requestLearnState(uri: String, name: String, state: LearnState) {
+        val action = TagAction.SetLearn(uri, name, state)
+        if (_ui.value.settings.confirmOverwrite) _ui.update { it.copy(pendingTag = action) } else runTagAction(action)
+    }
+
+    fun requestFixTags() {
+        val n = brokenTagSongs().size
+        if (n == 0) return run { _messages.tryEmit("Nothing to fix") }
+        val action = TagAction.FixAll(n)
+        if (_ui.value.settings.confirmOverwrite) _ui.update { it.copy(pendingTag = action) } else runTagAction(action)
+    }
+
+    fun dismissTagAction() = _ui.update { it.copy(pendingTag = null) }
+
+    fun confirmTagAction() {
+        val a = _ui.value.pendingTag ?: return
+        dismissTagAction()
+        runTagAction(a)
+    }
+
+    private fun brokenTagSongs() = library.index.value?.songs.orEmpty().filter { s -> s.issues.orEmpty().any { it.tagIssue } }
+
+    private fun runTagAction(a: TagAction) {
+        when (a) {
+            is TagAction.SetLearn -> viewModelScope.launch {
+                val ok = rewriteTags(a.uri) { tags, lines -> Search.withLyricsTags(Search.withLearnState(tags, a.state), lines) }
+                if (ok) _messages.tryEmit("${a.name}: ${if (a.state == LearnState.NONE) "learning tag removed" else a.state.label}")
+                else if (a.uri != currentUri) _messages.tryEmit("Can't write to ${a.name} — choose the music folder again in Settings")
+            }
+            is TagAction.FixAll -> viewModelScope.launch {
+                val songs = brokenTagSongs()
+                _ui.update { it.copy(busy = true) }
+                var failed = 0
+                for (s in songs) {
+                    if (!rewriteTags(s.uri) { tags, lines -> Search.withLyricsTags(tags, lines) }) failed++
+                }
+                _ui.update { it.copy(busy = false) }
+                _messages.tryEmit("Fixed tags on ${songs.size - failed} songs" + if (failed > 0) " ($failed could not be written)" else "")
+            }
+        }
+    }
+
+    /**
+     * Rewrites only the grouping tags of a song's file. [transform] gets the tags and the lyrics currently in the file.
+     * If the song is open in the editor, its working copy gets the same tags so a later Save doesn't undo this.
+     * Returns false when the file couldn't be written (for the open song the save-as picker is offered).
+     */
+    private suspend fun rewriteTags(uriString: String, transform: (List<String>, List<Line>) -> List<String>): Boolean {
+        val isOpen = uriString == currentUri
+        val res = withContext(Dispatchers.IO) {
+            runCatching {
+                val resolver = getApplication<Application>().contentResolver
+                val uri = uriString.toUri()
+                val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Could not open file")
+                val meta = Id3.readMeta(bytes.inputStream())
+                val tags = Search.parseTags(meta.grouping)
+                val lines = Id3.extractLines(Id3.parse(bytes))
+                val newTags = transform(tags, lines)
+                // Only touch the working copy (which restarts the player) if its tags actually differ.
+                if (isOpen && newTags != sessionTags()) applyTagsToSession(newTags)
+                if (newTags != tags) {
+                    val out = resolver.openOutputStream(uri, "wt") ?: error("no output stream")
+                    out.use { it.write(Id3.setGrouping(bytes, newTags)) }
+                }
+                Triple(newTags, meta, lines)
+            }
+        }
+        val (tags, meta, _) = res.getOrElse {
+            if (isOpen) { _messages.tryEmit("Can't write to the original file — choose where to save instead"); _saveAs.tryEmit(ExportKind.MP3) }
+            return false
+        }
+        library.updateEntry(uriString) { it.copy(tags = tags, issues = Issues.checkSong(tags, meta.lyricsText, meta.syltOnly).toList()) }
+        if (isOpen) _ui.update { it.copy(tags = tags) }
+        return true
+    }
+
+    /** Rewrites the grouping in the working copy and re-prepares the player (the audio moved inside the file). */
+    private suspend fun applyTagsToSession(tags: List<String>) {
+        val file = sessions.audioFile
+        val bytes = Id3.setGrouping(file.readBytes(), tags)
+        val tmp = java.io.File(file.path + ".tmp")
+        tmp.writeBytes(bytes)
+        tmp.renameTo(file)
+        withContext(Dispatchers.Main) {
+            val pos = player.currentPosition
+            val wasPlaying = player.playWhenReady
+            player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)), pos)
+            player.prepare()
+            player.playWhenReady = wasPlaying
+        }
+    }
+
+    // ---------------------------------------------------------------- fetching lyrics
+
+    private var fetchJob: Job? = null
+
+    private fun lyricsQuery(): LyricsQuery {
+        val s = _ui.value
+        val meta = runCatching { sessions.audioFile.inputStream().use { Id3.readMeta(it) } }.getOrNull()
+        return LyricsQuery(
+            title = meta?.title?.ifBlank { null } ?: Lrc.baseName(s.fileName.orEmpty()),
+            artist = meta?.artist.orEmpty(), album = meta?.album.orEmpty(),
+            durationMs = s.durationMs.takeIf { it > 0 },
+        )
+    }
+
+    /** Looks for lyrics online; the result is shown in a preview and only applied when accepted. */
+    fun fetchLyrics() {
+        if (!_ui.value.loaded) return
+        fetchJob?.cancel()
+        _ui.update { it.copy(fetch = FetchState.Loading) }
+        val cfg = _ui.value.settings
+        fetchJob = viewModelScope.launch {
+            val enabled = cfg.lyricsSources.filter { it.enabled }
+            if (enabled.isEmpty()) {
+                _ui.update { it.copy(fetch = FetchState.Failed("No lyrics source is turned on. Enable one in Settings > Lyrics sources.")) }
+                return@launch
+            }
+            val timeout = cfg.lyricsTimeoutSec * 1000
+            val providers = enabled.map {
+                when (it.source) {
+                    LyricsSource.LRCLIB -> LrclibProvider(timeout)
+                    LyricsSource.NETEASE -> NeteaseProvider(timeout)
+                    LyricsSource.LYRICSIFY -> LyricsifyProvider(timeout)
+                }
+            }
+            val outcome = withContext(Dispatchers.IO) { LyricsFetcher.fetch(lyricsQuery(), providers) }
+            val state = outcome.result?.let { FetchState.Found(it) } ?: FetchState.Failed(
+                if (outcome.errors.size == providers.size) "Couldn't reach any lyrics source. Check your internet connection.\n" + outcome.errors.joinToString("\n")
+                else "No lyrics found for this song." + outcome.errors.joinToString("") { "\n$it" }
+            )
+            _ui.update { if (it.fetch == FetchState.Loading) it.copy(fetch = state) else it }
+        }
+    }
+
+    fun dismissFetch() { fetchJob?.cancel(); _ui.update { it.copy(fetch = null) } }
+
+    fun setUseRomanization(on: Boolean) =
+        _ui.update { s -> (s.fetch as? FetchState.Found)?.let { s.copy(fetch = it.copy(useRomanization = on)) } ?: s }
+
+    fun acceptFetched() {
+        val f = _ui.value.fetch as? FetchState.Found ?: return
+        _ui.update { it.copy(fetch = null) }
+        if (!replaceAllLyrics(f.text)) return
+        _messages.tryEmit(if (f.result.synced) "Lyrics from ${f.result.source} loaded — save to keep them"
+        else "Plain lyrics from ${f.result.source} loaded — set the times, then save")
+    }
+
+    /** Manual route for sources that block the app: the user copies the lyrics in the browser and pastes them here. */
+    fun pasteFetchedFromClipboard() {
+        val cm = getApplication<Application>().getSystemService(ClipboardManager::class.java)
+        val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(getApplication())?.toString().orEmpty().trim()
+        if (text.isEmpty()) return run { _messages.tryEmit("The clipboard is empty") }
+        val synced = Lrc.looksLikeLrc(text)
+        _ui.update { it.copy(fetch = FetchState.Found(LyricsResult("Clipboard", synced, text, "Pasted text", 1.0))) }
+    }
+
+    fun openLyricsInBrowser() {
+        val intent = Intent(Intent.ACTION_VIEW, LyricsifyProvider.searchUrl(lyricsQuery()).toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { getApplication<Application>().startActivity(intent) }.onFailure { _messages.tryEmit("No browser found") }
     }
 
     override fun onCleared() {
