@@ -193,6 +193,30 @@ object Lrc {
         }
     }
 
+    private val BLANK_TAGGED_RE = Regex("""^\s*(?:\[[0-9]{1,3}:[0-9]{2}(?:[.:][0-9]{1,3})?]\s*)+$""")
+
+    /**
+     * [text] without the empty lines that start the lyrics (blank lines and timestamps with no text, after the song info tags).
+     * Everything else is kept as it is. Null if there is nothing to remove.
+     */
+    fun removeLeadingEmpty(text: String): String? {
+        val raw = text.split(NEWLINE_RE)
+        val keep = ArrayList<String>()
+        var leading = true
+        var dropped = false
+        for ((i, line) in raw.withIndex()) {
+            if (leading) {
+                val next = raw.getOrNull(i + 1)
+                // A timestamp alone on its line followed by text without one: that text belongs to it.
+                val hasContinuation = next != null && next.isNotBlank() && !METADATA_RE.matches(next) && !TAG_RE.containsMatchIn(next)
+                if (line.isBlank() || (BLANK_TAGGED_RE.matches(line) && !hasContinuation)) { dropped = true; continue }
+                if (!METADATA_RE.matches(line)) leading = false
+            }
+            keep += line
+        }
+        return if (dropped) keep.joinToString("\n") else null
+    }
+
     /** Plain lyrics import: every non-blank line becomes its own untimed entry. */
     fun plainTextToLines(text: String): List<Line> =
         text.split(NEWLINE_RE).map { it.trim() }.filter { it.isNotEmpty() }.map { newLine(null, it) }

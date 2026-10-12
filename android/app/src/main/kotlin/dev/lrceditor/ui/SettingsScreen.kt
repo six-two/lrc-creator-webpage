@@ -1,5 +1,11 @@
 package dev.lrceditor.ui
 
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontFamily
+import android.widget.Toast
+import android.content.ClipboardManager
+import android.content.ClipData
+import kotlin.math.roundToInt
 import android.content.pm.ApplicationInfo
 import android.net.Uri
 import androidx.core.net.toUri
@@ -45,7 +51,7 @@ import dev.lrceditor.data.TimeSwipe
 private enum class SettingsPage(val title: String, val summary: String, val icon: ImageVector) {
     LIBRARY("Library", "Music folder, scanning, ignored folders and files", Icons.Filled.LibraryMusic),
     SEARCH("Search", "What each song shows in the Library", Icons.Filled.Search),
-    EDITOR("Editor", "Timing, tick sound and swipe gestures", Icons.Filled.Timer),
+    EDITOR("Editor", "Player, timing, tick sound and swipe gestures", Icons.Filled.Timer),
     LYRICS("Lyrics sources", "Where to fetch lyrics from, and in which order", Icons.Filled.CloudDownload),
     SAVING("Saving", "Writing lyrics into the MP3", Icons.Filled.Save),
 }
@@ -53,6 +59,7 @@ private enum class SettingsPage(val title: String, val summary: String, val icon
 @Composable
 fun SettingsScreen(vm: EditorViewModel, s: Settings) {
     var page by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
+    val speed = vm.ui.collectAsStateWithLifecycle().value.speed
     // Back from a sub page returns to the list (registered after the app-level handler, so it wins).
     BackHandler(enabled = page != null) { page = null }
 
@@ -81,8 +88,8 @@ fun SettingsScreen(vm: EditorViewModel, s: Settings) {
                 }
                 SettingsPage.LIBRARY -> LibrarySettings(vm, s)
                 SettingsPage.SEARCH -> SearchSettings(s, vm::updateSettings)
-                SettingsPage.EDITOR -> EditorSettings(s, vm::updateSettings)
-                SettingsPage.LYRICS -> LyricsSettings(s, vm::updateSettings)
+                SettingsPage.EDITOR -> EditorSettings(s, vm::updateSettings, speed, vm::setSpeed)
+                SettingsPage.LYRICS -> LyricsSettings(vm, s, vm::updateSettings)
                 SettingsPage.SAVING -> SavingSettings(s, vm::updateSettings)
             }
         }
@@ -156,9 +163,16 @@ private fun ColumnScope.SearchSettings(s: Settings, onChange: (Settings) -> Unit
 }
 
 @Composable
-private fun ColumnScope.EditorSettings(s: Settings, onChange: (Settings) -> Unit) {
+private fun ColumnScope.EditorSettings(s: Settings, onChange: (Settings) -> Unit, speed: Float, onSpeed: (Float) -> Unit) {
+    SectionTitle("Player")
+    SwitchRow("Minimal player", s.minimalPlayer) { onChange(s.copy(minimalPlayer = it)) }
+    Text("Hides the skip, play / pause, speed and tick buttons under the progress bar. Instead, tap the time next to the progress bar to play / pause, double-tap to jump back 2 s, triple-tap 5 s, then 10 s and 30 s. The tick sound and the speed are set here then.",
+        color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+    RadioChoice("Playback speed (the open song)", speed, listOf(1f, 0.9f, 0.75f, 0.5f, 0.25f), { "${(it * 100).toInt()}%" }, onSpeed)
+
+    HorizontalDivider(color = Studio.Border)
     SectionTitle("Timing")
-    SwitchRow("Tick sound at each line", s.tickEnabled) { onChange(s.copy(tickEnabled = it)) }
+    SwitchRow("Tick sound at each line (metronome)", s.tickEnabled) { onChange(s.copy(tickEnabled = it)) }
     Text("Tick volume ${(s.tickVolume * 100).toInt()}%")
     Slider(s.tickVolume, { onChange(s.copy(tickVolume = it)) }, enabled = s.tickEnabled)
 
@@ -174,8 +188,15 @@ private fun ColumnScope.EditorSettings(s: Settings, onChange: (Settings) -> Unit
         color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
 
     HorizontalDivider(color = Studio.Border)
+    SectionTitle("Warnings")
+    Text("Short break warning: under ${"%.1f".format(s.minBreakMs / 1000.0)} s")
+    Slider(s.minBreakMs / 1000f, { onChange(s.copy(minBreakMs = (it * 10).roundToInt().coerceIn(1, 30) * 100L)) }, valueRange = 0.1f..3f)
+    Text("An empty line followed by a lyric line less than this much later is a warning, in the editor and in the Fix list (Warnings).",
+        color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+
+    HorizontalDivider(color = Studio.Border)
     SectionTitle("Swipe gestures")
-    Text("Swipe a line in the editor to act on it. Double-tap a line's text to edit it with the full row width.",
+    Text("Swipe a line in the editor to act on it. Long-press a line's text to edit it with the full row width (all of the text is selected).",
         color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
     RadioChoice("Swipe a line left", s.swipeLeft, SwipeAction.entries, { it.label }) { onChange(s.copy(swipeLeft = it)) }
     RadioChoice("Swipe a line right", s.swipeRight, SwipeAction.entries, { it.label }) { onChange(s.copy(swipeRight = it)) }
@@ -185,7 +206,7 @@ private fun ColumnScope.EditorSettings(s: Settings, onChange: (Settings) -> Unit
 }
 
 @Composable
-private fun ColumnScope.LyricsSettings(s: Settings, onChange: (Settings) -> Unit) {
+private fun ColumnScope.LyricsSettings(vm: EditorViewModel, s: Settings, onChange: (Settings) -> Unit) {
     Text("\"Fetch lyrics\" in the editor tries the enabled sources from top to bottom. The first synced result wins; if no source has synced lyrics, the first plain-text result is offered. You always get a preview before anything changes.",
         color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
     fun move(i: Int, d: Int) {
@@ -206,6 +227,22 @@ private fun ColumnScope.LyricsSettings(s: Settings, onChange: (Settings) -> Unit
         HorizontalDivider(color = Studio.Border.copy(alpha = 0.5f))
     }
     RadioChoice("Timeout per request", s.lyricsTimeoutSec, listOf(5, 10, 20, 30), { "$it seconds" }) { onChange(s.copy(lyricsTimeoutSec = it)) }
+
+    HorizontalDivider(color = Studio.Border)
+    val test by vm.connectionTest.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    Button(onClick = vm::testLyricsConnections, enabled = test?.running != true) { Text(if (test?.running == true) "Testing…" else "Test connection") }
+    Text("Searches every source above (also the turned-off ones) for a well-known song and shows which worked and why the others did not.",
+        color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+    test?.let { t ->
+        Surface(color = Studio.Panel2, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth().clickable {
+            context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Lyrics connection test", t.report))
+            Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+        }) {
+            Text(t.report, Modifier.padding(8.dp), fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        }
+        Text("Tap the result to copy it.", color = Studio.Faint, style = MaterialTheme.typography.bodySmall)
+    }
 }
 
 @Composable

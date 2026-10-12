@@ -86,7 +86,8 @@ object LyricsFetcher {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                errors += "${p.name}: ${e.message ?: e.javaClass.simpleName}"
+                runCatching { android.util.Log.w("LyricsFetch", "${p.name} failed", e) } // not available in unit tests
+                errors += "${p.name}: ${e.javaClass.simpleName}: ${e.message ?: ""}".trimEnd(' ', ':')
                 continue
             }.filter { it.score >= LyricsMatch.MIN_SCORE && it.text.isNotBlank() }
             found.filter { it.synced }.maxByOrNull { it.score }?.let { return FetchOutcome(it, errors) }

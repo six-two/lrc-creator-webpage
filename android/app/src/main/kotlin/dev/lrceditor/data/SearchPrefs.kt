@@ -20,6 +20,11 @@ data class SearchPrefs(
     val fuzzy: Boolean = true,
     val include: List<String> = emptyList(),
     val exclude: List<String> = emptyList(),
+    /** Fix list: problem categories (by label) a song must all have / must have none of. */
+    val fixInclude: List<String> = emptyList(),
+    val fixExclude: List<String> = emptyList(),
+    /** Fix list without included categories: also list songs that only have warnings. */
+    val fixWarnings: Boolean = false,
     /** Shared by all search pages. */
     val lyrics: LyricsFilter = LyricsFilter.ALL,
 )

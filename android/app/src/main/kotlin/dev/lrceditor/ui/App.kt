@@ -1,5 +1,6 @@
 package dev.lrceditor.ui
 
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,10 +22,16 @@ import dev.lrceditor.Tab
 import dev.lrceditor.TagAction
 import dev.lrceditor.core.LearnState
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun LrcApp(vm: EditorViewModel) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+
+    // Closing the keyboard (e.g. with Back) also takes the focus off the text field, so its suggestion dropdown goes away too.
+    val focusManager = LocalFocusManager.current
+    val keyboardOpen = WindowInsets.isImeVisible
+    LaunchedEffect(keyboardOpen) { if (!keyboardOpen) focusManager.clearFocus() }
 
     val pickFolder = rememberLauncherForActivityResult(OpenWritableTree()) { it?.let(vm::setLibraryRoot) }
     LaunchedEffect(Unit) { vm.messages.collect { snackbar.showSnackbar(it) } }
@@ -104,9 +111,10 @@ fun LrcApp(vm: EditorViewModel) {
     )
     ui.pendingTag?.let { a ->
         ConfirmDialog(
-            title = "Change tags in the file?",
+            title = if (a is TagAction.FixLeadingEmpty) "Change the lyrics in the files?" else "Change tags in the file?",
             text = when (a) {
                 is TagAction.SetLearn -> "The tags of \"${a.name}\" are rewritten in place (${a.state.label.let { if (a.state == LearnState.NONE) "learning tag removed" else "marked $it" }}). Other tags and the lyrics are kept."
+                is TagAction.FixLeadingEmpty -> "The empty first line is removed from the lyrics of ${a.uris.size} songs, in place. Nothing else in the lyrics or tags changes."
                 is TagAction.FixAll -> "The Lyrics and Karaoke tags of ${a.count} songs are rewritten in place to match their lyrics. Other tags and the lyrics are kept."
             },
             confirm = "Change", onConfirm = vm::confirmTagAction, onDismiss = vm::dismissTagAction,

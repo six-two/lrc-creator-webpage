@@ -1,5 +1,8 @@
 package dev.lrceditor.ui
 
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -70,9 +73,9 @@ fun EditorScreen(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Unit, onSa
         HorizontalDivider(color = Studio.Border)
         EditorWarnings(vm, ui)
         val listState = rememberLazyListState()
-        val problems = remember(ui.lines) { Issues.lineProblems(ui.lines) }
-        val outOfOrderIds = remember(problems) { problems.filter { it.second == LineProblem.OUT_OF_ORDER }.map { it.first }.toSet() }
-        val sameTimeIds = remember(problems) { problems.filter { it.second == LineProblem.SAME_TIME }.map { it.first }.toSet() }
+        val duration = ui.durationMs.takeIf { it > 0 }
+        val problems = remember(ui.lines, ui.settings.minBreakMs, duration) { Issues.lineProblems(ui.lines, ui.settings.minBreakMs, duration) }
+        val kindsByLine = remember(problems) { problems.groupBy({ it.first }, { it.second }).mapValues { it.value.toSet() } }
 
         // Keep the line being played in view while playing (selection never moves playback, and vice versa).
         LaunchedEffect(ui.playingId) {
@@ -104,7 +107,7 @@ fun EditorScreen(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Unit, onSa
                 }
             }
             itemsIndexed(ui.lines, key = { _, l -> l.id }) { _, line ->
-                LineRow(vm, ui, line, line.id in outOfOrderIds, line.id in sameTimeIds)
+                LineRow(vm, ui, line, kindsByLine[line.id].orEmpty())
                 HorizontalDivider(color = Studio.Border.copy(alpha = 0.5f))
             }
         }
@@ -151,6 +154,9 @@ private fun EditorHeader(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Un
                 val isBroken = vm.currentUriString() in broken
                 DropdownMenuItem(text = { Text(if (isBroken) "Remove broken-lyrics mark" else "Mark lyrics as broken") },
                     leadingIcon = { Icon(Icons.Filled.Warning, null) }, onClick = { menu = false; vm.toggleBrokenLyrics() })
+                val buggy by vm.buggyFiles.collectAsStateWithLifecycle()
+                DropdownMenuItem(text = { Text(if (vm.currentUriString() in buggy) "Remove buggy-file mark" else "Mark file as buggy") },
+                    leadingIcon = { Icon(Icons.Filled.BugReport, null) }, onClick = { menu = false; vm.toggleBuggyFile() })
                 DropdownMenuItem(text = { Text("File info") }, leadingIcon = { Icon(Icons.Filled.Info, null) },
                     onClick = { menu = false; vm.showInfo() })
             }
@@ -162,7 +168,8 @@ private fun EditorHeader(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Un
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EditorWarnings(vm: EditorViewModel, ui: UiState) {
-    val problems = remember(ui.lines) { Issues.lineProblems(ui.lines) }
+    val duration = ui.durationMs.takeIf { it > 0 }
+    val problems = remember(ui.lines, ui.settings.minBreakMs, duration) { Issues.lineProblems(ui.lines, ui.settings.minBreakMs, duration) }
     fun count(k: LineProblem) = problems.count { it.second == k }
     val conflict = Issue.CONFLICTING_LEARN_TAGS in Issues.checkSong(ui.tags, null)
     fun times(n: Int) = if (n > 1) " ×$n" else ""
@@ -172,6 +179,10 @@ private fun EditorWarnings(vm: EditorViewModel, ui: UiState) {
         ("times out of order${times(count(LineProblem.OUT_OF_ORDER))}" to LineProblem.OUT_OF_ORDER).takeIf { count(LineProblem.OUT_OF_ORDER) > 0 },
         ("same time twice in a row${times(count(LineProblem.SAME_TIME))}" to LineProblem.SAME_TIME).takeIf { count(LineProblem.SAME_TIME) > 0 },
         ("odd timestamps in text${times(count(LineProblem.ODD_TIMESTAMPS))}" to LineProblem.ODD_TIMESTAMPS).takeIf { count(LineProblem.ODD_TIMESTAMPS) > 0 },
+        ("time after the end of the song${times(count(LineProblem.PAST_END))}" to LineProblem.PAST_END).takeIf { count(LineProblem.PAST_END) > 0 },
+        ("empty lines in a row${times(count(LineProblem.EMPTY_REPEAT))}" to LineProblem.EMPTY_REPEAT).takeIf { count(LineProblem.EMPTY_REPEAT) > 0 },
+        ("short break${times(count(LineProblem.SHORT_BREAK))}" to LineProblem.SHORT_BREAK).takeIf { count(LineProblem.SHORT_BREAK) > 0 },
+        ("empty line at the start" to LineProblem.LEADING_EMPTY).takeIf { count(LineProblem.LEADING_EMPTY) > 0 },
     )
     val canCompare = remember(ui.lines) { vm.doubleLyrics(ui.lines) != null }
     if (parts.isEmpty() && !conflict && !canCompare) return
@@ -192,7 +203,7 @@ private fun EditorWarnings(vm: EditorViewModel, ui: UiState) {
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-private fun LineRow(vm: EditorViewModel, ui: UiState, line: Line, outOfOrder: Boolean, sameTime: Boolean) {
+private fun LineRow(vm: EditorViewModel, ui: UiState, line: Line, problems: Set<LineProblem>) {
     val selected = ui.selectedId == line.id
     val playing = ui.playingId == line.id
     val editing = ui.editingTextId == line.id
@@ -264,21 +275,32 @@ private fun LineRow(vm: EditorViewModel, ui: UiState, line: Line, outOfOrder: Bo
                     fontStyle = if (blank) FontStyle.Italic else FontStyle.Normal,
                     modifier = Modifier.weight(1f).padding(horizontal = 6.dp, vertical = 6.dp).combinedClickable(
                         onClick = { vm.tapLine(line.id) },
-                        onDoubleClick = { vm.startEditText(line.id) },
+                        // Long-press edits the line without moving the player (a tap plays from the line).
+                        onLongClick = { vm.startEditText(line.id) },
                     ),
                 )
-                if (outOfOrder) Icon(Icons.Filled.Warning, "Out of order", tint = Studio.Warn, modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp).size(16.dp))
-                // Same time as the line before it: the warning sits at the end of the line, with a short label for what it is.
-                if (sameTime) Row(Modifier.padding(horizontal = 6.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.Warning, "Same time as the line before", tint = Studio.Warn, modifier = Modifier.size(16.dp))
-                    Text("same", Modifier.padding(start = 2.dp), color = Studio.Warn, style = MaterialTheme.typography.labelSmall)
-                }
+                if (LineProblem.OUT_OF_ORDER in problems) Icon(Icons.Filled.Warning, "Out of order", tint = Studio.Warn, modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp).size(16.dp))
+                // These sit at the end of the line, with a short label for what they are.
+                if (LineProblem.SAME_TIME in problems) ProblemTag("same", "Same time as the line before")
+                if (LineProblem.PAST_END in problems) ProblemTag("past end", "After the end of the song", error = true)
+                if (LineProblem.LEADING_EMPTY in problems) ProblemTag("not needed", "Empty line at the start of the song")
+                if (LineProblem.EMPTY_REPEAT in problems) ProblemTag("empty ×2", "Empty line right after an empty line")
+                if (LineProblem.SHORT_BREAK in problems) ProblemTag("short", "Break to the next line is shorter than the limit in Settings")
             }
         }
     }
 
     if (ui.editingTimeId == line.id) {
         TimeEditDialog(line.timeMs, onCommit = { vm.setTime(line.id, it); vm.startEditTime(null) }, onDismiss = { vm.startEditTime(null) })
+    }
+}
+
+@Composable
+private fun ProblemTag(label: String, description: String, error: Boolean = false) {
+    val color = if (error) Studio.Danger else Studio.Warn
+    Row(Modifier.padding(horizontal = 6.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Filled.Warning, description, tint = color, modifier = Modifier.size(16.dp))
+        Text(label, Modifier.padding(start = 2.dp), color = color, style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -307,8 +329,8 @@ private fun Modifier.timeSwipe(vm: EditorViewModel, id: Long, hasTime: Boolean, 
 
 @Composable
 private fun TextEditor(initial: String, modifier: Modifier, onCommit: (String) -> Unit, onCancel: () -> Unit) {
-    // Cursor starts at the end of the text, with the keyboard up.
-    var text by remember { mutableStateOf(TextFieldValue(initial, TextRange(initial.length))) }
+    // All the text starts selected (typing replaces it, a tap in the field puts the cursor), with the keyboard up.
+    var text by remember { mutableStateOf(TextFieldValue(initial, TextRange(0, initial.length))) }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
     Column(modifier) {
@@ -332,7 +354,16 @@ private fun PlayerBar(vm: EditorViewModel, ui: UiState) {
     Surface(color = Studio.Panel, tonalElevation = 2.dp) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text((dragging?.toLong() ?: pos).let { if (compact) Lrc.formatTimeShort(it) else Lrc.formatTime(it) }, fontFamily = FontFamily.Monospace, color = Studio.Amber, fontSize = 13.sp)
+                val scope = rememberCoroutineScope()
+                var taps by remember { mutableIntStateOf(0) }
+                var tapJob by remember { mutableStateOf<Job?>(null) }
+                // Minimal player: taps on the time are counted until a short pause, then act (see EditorViewModel.timeTapped).
+                val tapModifier = if (!ui.settings.minimalPlayer) Modifier else Modifier.clickable {
+                    taps++
+                    tapJob?.cancel()
+                    tapJob = scope.launch { delay(300); val n = taps; taps = 0; vm.timeTapped(n) }
+                }.padding(vertical = 10.dp)
+                Text((dragging?.toLong() ?: pos).let { if (compact) Lrc.formatTimeShort(it) else Lrc.formatTime(it) }, tapModifier, fontFamily = FontFamily.Monospace, color = Studio.Amber, fontSize = 13.sp)
                 Slider(
                     value = (dragging ?: pos.toFloat()).coerceIn(0f, dur.toFloat()),
                     onValueChange = { dragging = it },
@@ -341,7 +372,7 @@ private fun PlayerBar(vm: EditorViewModel, ui: UiState) {
                     modifier = Modifier.weight(1f).padding(start = 8.dp),
                 )
             }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            if (!ui.settings.minimalPlayer) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 TextButton(onClick = { vm.seekBy(-5000) }, contentPadding = PaddingValues(4.dp)) { Text("−5s") }
                 TextButton(onClick = { vm.seekBy(-1000) }, contentPadding = PaddingValues(4.dp)) { Text("−1s") }
                 FilledIconButton(onClick = vm::togglePlay) {

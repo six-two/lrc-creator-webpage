@@ -50,15 +50,30 @@ fun SongsScreen(vm: EditorViewModel) {
     val recents by vm.recents.collectAsStateWithLifecycle()
     val tags by vm.tagCounts.collectAsStateWithLifecycle()
     var showAllRecents by rememberSaveable { mutableStateOf(false) }
-    // Problems need fixing; warnings (e.g. odd timestamps) are only for review.
     val markedBroken by vm.brokenLyrics.collectAsStateWithLifecycle()
     // Hand-made marks are added on top of what the scan found.
-    val songs = remember(index, markedBroken) {
-        index?.songs.orEmpty().map { s -> if (s.uri in markedBroken) s.copy(issues = s.issues.orEmpty() + Issue.BROKEN_LYRICS) else s }
+    val markedBuggy by vm.buggyFiles.collectAsStateWithLifecycle()
+    val minBreakMs = settings.settings.minBreakMs
+    val songs = remember(index, markedBroken, markedBuggy, minBreakMs) {
+        index?.songs.orEmpty().map { it.withMarks(minBreakMs, markedBroken, markedBuggy) }
     }
-    val attention = remember(songs) { songs.filter { s -> s.issues.orEmpty().any { !it.warning } }.sortedWith(Search.songOrder) }
-    val warnings = remember(songs) { songs.filter { s -> s.issues.orEmpty().any { it.warning } }.sortedWith(Search.songOrder) }
-    var showWarnings by rememberSaveable { mutableStateOf(false) }
+    // Problems need fixing; warnings (e.g. odd timestamps) are only for review. Songs with either count in the Fix tab.
+    val flagged = remember(songs) { songs.filter { it.issues.orEmpty().isNotEmpty() }.sortedWith(Search.songOrder) }
+    val categories = remember(flagged) {
+        Issue.entries.map { i -> TagCount(i.label, flagged.count { i in it.issues.orEmpty() }) }.filter { it.count > 0 }
+    }
+    fun issuesOf(labels: List<String>) = labels.mapNotNull { l -> Issue.entries.firstOrNull { it.label.equals(l, ignoreCase = true) } }
+    val fixInclude = issuesOf(prefs.fixInclude)
+    val fixExclude = issuesOf(prefs.fixExclude)
+    // Included categories decide what is listed (warnings too); without any, problems are listed, and warnings if asked for.
+    val list = remember(flagged, fixInclude, fixExclude, prefs.fixWarnings) {
+        flagged.filter { s ->
+            val have = s.issues.orEmpty()
+            fixExclude.none { it in have } && (if (fixInclude.isNotEmpty()) fixInclude.all { it in have }
+                else have.any { !it.warning || prefs.fixWarnings })
+        }
+    }
+    val groups = if (fixInclude.isNotEmpty()) fixInclude else Issue.entries.filter { !it.warning || prefs.fixWarnings }
     // Issues whose group is folded away.
     val collapsed = rememberSaveable { mutableStateListOf<String>() }
     val unknownLyrics = remember(index) { index?.songs?.count { it.lyrics == LyricsState.UNKNOWN } ?: 0 }
@@ -80,7 +95,7 @@ fun SongsScreen(vm: EditorViewModel) {
         if (scan.running) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
 
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(vertical = if (compact) 4.dp else 8.dp)) {
-            val modes = listOf(SongsMode.RECENT to "Recent", SongsMode.ATTENTION to if (attention.size + warnings.size == 0) "Fix" else "Fix ${attention.size + warnings.size}", SongsMode.TITLE to "Song", SongsMode.FILENAME to "File", SongsMode.TAGS to "Tags")
+            val modes = listOf(SongsMode.RECENT to "Recent", SongsMode.ATTENTION to if (flagged.isEmpty()) "Fix" else "Fix ${flagged.size}", SongsMode.TITLE to "Song", SongsMode.FILENAME to "File", SongsMode.TAGS to "Tags")
             modes.forEachIndexed { i, (m, label) ->
                 // No check icon and a single-line label: otherwise "Recent" wraps on narrow screens and inflates the row.
                 SegmentedButton(prefs.mode == m, { vm.updateSearch { it.copy(mode = m) } },
@@ -105,28 +120,28 @@ fun SongsScreen(vm: EditorViewModel) {
                     }
                 }
                 SongsMode.ATTENTION -> {
-                    val list = if (showWarnings) warnings else attention
                     item {
-                        val broken = attention.count { s -> s.issues.orEmpty().any { it.tagIssue } }
+                        val tagFixable = flagged.count { s -> s.issues.orEmpty().any { it.tagIssue } }
                         Column(Modifier.padding(vertical = 8.dp)) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                FilterChip(!showWarnings, { showWarnings = false }, { Text("Problems ${attention.size}") })
-                                FilterChip(showWarnings, { showWarnings = true }, { Text("Warnings ${warnings.size}") })
-                            }
+                            TagField("Include (all of)", prefs.fixInclude, categories) { t -> vm.updateSearch { it.copy(fixInclude = t) } }
+                            Spacer(Modifier.height(8.dp))
+                            TagField("Exclude (none of)", prefs.fixExclude, categories) { t -> vm.updateSearch { it.copy(fixExclude = t) } }
+                            if (fixInclude.isEmpty()) FilterChip(prefs.fixWarnings, { vm.updateSearch { it.copy(fixWarnings = !prefs.fixWarnings) } },
+                                { Text("Also songs with only warnings") }, modifier = Modifier.padding(top = 4.dp))
                             Text(when {
-                                list.isEmpty() -> if (showWarnings) "No warnings." else "Nothing needs fixing."
-                                showWarnings -> "${list.size} song${if (list.size == 1) "" else "s"} to review: the same timestamp twice in a row, or odd digits in timestamps (e.g. from a romanization tool). Tap one to open it in the editor."
-                                else -> "${list.size} song${if (list.size == 1) "" else "s"} need attention. Tap one to open it in the editor."
+                                flagged.isEmpty() -> "Nothing needs fixing."
+                                list.isEmpty() -> "No songs match."
+                                else -> "${list.size} song${if (list.size == 1) "" else "s"}. Tap one to open it in the editor."
                             }, color = Studio.Dim, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-                            if (!showWarnings && broken > 0) {
-                                Text("Lyrics / Karaoke tags that don't match the lyrics can be corrected without opening the songs.",
+                            if (tagFixable > 0) {
+                                Text("Lyrics / Karaoke tags that don't match the lyrics can be corrected without opening the songs (all songs, not only those listed).",
                                     color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
-                                OutlinedButton(onClick = vm::requestFixTags) { Text("Fix tags on $broken song${if (broken == 1) "" else "s"}") }
+                                OutlinedButton(onClick = vm::requestFixTags) { Text("Fix tags on $tagFixable song${if (tagFixable == 1) "" else "s"}") }
                             }
                         }
                     }
                     // One group per issue; a song with several issues shows up in each of its groups.
-                    Issue.entries.forEach { issue ->
+                    groups.forEach { issue ->
                         val members = list.filter { s -> issue in s.issues.orEmpty() }
                         if (members.isEmpty()) return@forEach
                         val open = issue.name !in collapsed
@@ -136,6 +151,13 @@ fun SongsScreen(vm: EditorViewModel) {
                                 Icon(if (open) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, if (open) "Collapse" else "Expand", tint = Studio.Dim)
                                 Text("${issue.label.replaceFirstChar { it.uppercase() }} (${members.size})", Modifier.padding(start = 8.dp),
                                     color = Studio.Warn, style = MaterialTheme.typography.titleSmall)
+                            }
+                            if (open && issue == Issue.LEADING_EMPTY) Column(Modifier.padding(bottom = 8.dp)) {
+                                Text("An empty first line is unnecessary. It can be removed from the lyrics of the songs below without opening them.",
+                                    color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+                                OutlinedButton(onClick = { vm.requestFixLeadingEmpty(members.map { it.uri }) }) {
+                                    Text("Remove it from ${members.size} song${if (members.size == 1) "" else "s"}")
+                                }
                             }
                             HorizontalDivider(color = Studio.Border)
                         }

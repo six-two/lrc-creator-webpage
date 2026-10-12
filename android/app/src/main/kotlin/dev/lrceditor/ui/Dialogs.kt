@@ -1,5 +1,14 @@
 package dev.lrceditor.ui
 
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.Icons
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.platform.LocalContext
+import android.widget.Toast
+import android.content.ClipboardManager
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -25,7 +34,11 @@ fun ConfirmDialog(title: String, text: String, confirm: String, onConfirm: () ->
 
 @Composable
 fun LyricsTextDialog(initial: String, error: String?, onApply: (String) -> Unit, onDismiss: () -> Unit) {
-    var text by remember { mutableStateOf(initial) }
+    // All of the text starts selected, so typing or pasting replaces it.
+    var text by remember { mutableStateOf(TextFieldValue(initial, TextRange(0, initial.length))) }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    val context = LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -38,10 +51,16 @@ fun LyricsTextDialog(initial: String, error: String?, onApply: (String) -> Unit,
                 Text("Paste LRC or plain lyrics. This replaces all current lines.", color = Studio.Dim,
                     style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth().heightIn(min = 240.dp, max = 420.dp))
+                OutlinedButton(onClick = {
+                    val clip = context.getSystemService(ClipboardManager::class.java).primaryClip
+                    val pasted = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                    if (pasted.isEmpty()) Toast.makeText(context, "The clipboard is empty", Toast.LENGTH_SHORT).show()
+                    else text = TextFieldValue(pasted, TextRange(pasted.length))
+                }) { Icon(Icons.Filled.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("Replace text with clipboard") }
+                OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth().heightIn(min = 240.dp, max = 420.dp).focusRequester(focus))
             }
         },
-        confirmButton = { TextButton(onClick = { onApply(text) }) { Text("Replace lyrics") } },
+        confirmButton = { TextButton(onClick = { onApply(text.text) }) { Text("Replace lyrics") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }

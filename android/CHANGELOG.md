@@ -2,6 +2,24 @@
 
 High-level, human-readable list of what changed in the Android app. Newest version first.
 
+## 0.0.6
+
+- New warning "short break between lyrics": an empty line followed by a lyric line less than a set time later. The limit is set in Settings > Editor > Warnings (default 0.3 s). The empty line shows "short" at its end, and the warning is above the editor and in the Fix list under Warnings.
+- New problem "timestamp after the end of the song": a lyric time later than the song is long. It shows in the Fix list, above the editor, and as "past end" on the lines concerned. The length of each song is now read when the library is scanned.
+- New warning "empty lines in a row" for an empty line directly after another empty line.
+- Editor: long-press a line's text to edit it, with all of the text selected. This replaces double-tapping, which also made the player jump to the line. Tapping a line still plays from it.
+- Editor menu: "Mark file as buggy" puts the song in the Fix list (group "Marked as buggy file") until you remove the mark. Like the broken-lyrics mark it is kept on the phone, not in the file.
+- Songs marked as buggy or as having broken lyrics are written, with their full path, to the log (`adb logcat -s LrcFlagged`) and to lrc-flagged-files.txt in the app's folder on shared storage (Android/data/dev.lrceditor/files) on every start and whenever a mark changes, so a problem can be looked at straight from the file.
+- Fetching lyrics: when a source can't be reached, the message now names the actual error (for example UnknownHostException), and the network state (DNS servers, Private DNS) is written to the log (`adb logcat -s LyricsFetch`). This is to find out why fetching fails on some phones.
+- Settings > Lyrics sources: "Test connection" tries every source (also turned-off ones) and shows which worked and the exact error of those that did not, plus the phone's network state. Tap the result to copy it.
+- Import / edit lyrics text: all the text starts selected, so pasting or typing replaces it, and a new button "Replace text with clipboard" does it in one tap.
+- Settings > Editor > Player: "Minimal player" (off by default) hides the skip, play / pause, speed and tick buttons under the progress bar. Then a tap on the time next to the progress bar plays / pauses, a double tap jumps back 2 seconds, and more taps jump back further (5, 10, then 30 seconds; never before the start). The playback speed now has a setting too, next to the tick sound.
+- New warning "empty line at the start": the first line of the lyrics (after the song info tags like [ar:...]) is empty, which is unnecessary. In the Fix list under Warnings a button removes it from the lyrics of all those songs at once (asks first, like the tag fix). Songs with a synced frame and the song open in the editor are skipped.
+- The Fix list now has "Include (all of)" and "Exclude (none of)" fields with suggestions, like the Tags search, to pick problem categories (with their song counts). Without an included category it lists songs with problems, and "Also songs with only warnings" adds the others. The groups below follow the included categories.
+- The "Remove it from N songs" button for the empty first line is now in that problem's group in the Fix list, and only touches the songs listed there.
+- Closing the keyboard now also takes the focus off the text field, so suggestion dropdowns (tags, problems) close with it.
+- The library data version went up (to 6) because the index now stores the song length and the short breaks, so the app rescans all songs in the background once.
+
 ## 0.0.5
 
 - The app now needs Android 16 or newer (it no longer installs on older versions), so it behaves the same on every supported phone.

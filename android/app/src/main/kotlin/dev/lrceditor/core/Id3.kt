@@ -136,6 +136,8 @@ object Id3 {
     class Meta(
         val title: String, val artist: String, val album: String, val grouping: String, val lyrics: LyricsState,
         val lyricsText: String? = null, val syltOnly: Boolean = false,
+        /** Length of the audio, worked out from the first MPEG frame (Xing/VBRI frame count, else the constant bitrate). Null if unknown. */
+        val durationMs: Long? = null,
     )
 
     private val META_FRAMES = setOf("TIT2", "TPE1", "TALB", "TIT1", "GRP1", "USLT")
@@ -164,7 +166,7 @@ object Id3 {
      * Reads title/artist/album/grouping from the start of a stream without loading the whole tag
      * (album art frames are skipped, not read). TIT1 and the iTunes GRP1 frame both count as grouping.
      */
-    fun readMeta(input: InputStream): Meta {
+    fun readMeta(input: InputStream, fileSize: Long = -1): Meta {
         val empty = Meta("", "", "", "", LyricsState.NONE)
         val header = ByteArray(10)
         if (!readFully(input, header)) return empty
@@ -176,30 +178,83 @@ object Id3 {
 
         if (flags and 0xC0 != 0) { // unsynchronisation or extended header: take the simple, slower path
             val region = ByteArray(size)
-            readFully(input, region)
-            return metaFromFrames(parse(header + region).frames)
+            val whole = readFully(input, region)
+            return metaFromFrames(parse(header + region).frames, if (whole) audioDuration(input, 10L + size, fileSize) else null)
         }
         val frames = mutableListOf<Frame>()
         val fh = ByteArray(10)
         var consumed = 0
+        // Only when the tag was read up to its padding is the stream positioned so that the audio can be found after it.
+        var positioned = true
         while (consumed + 10 <= size) {
-            if (!readFully(input, fh)) break
+            if (!readFully(input, fh)) { positioned = false; break }
             consumed += 10
             if (fh[0] == 0.toByte()) break
             val id = String(fh, 0, 4, Charsets.ISO_8859_1)
             val fs = if (major >= 4) readSyncsafe(fh, 4) else readU32BE(fh, 4).toInt()
-            if (fs < 0 || consumed + fs > size) break
+            if (fs < 0 || consumed + fs > size) { positioned = false; break }
             if (id == "SYLT") { // only its presence matters
                 frames += Frame(id, ByteArray(0))
-                if (!skipFully(input, fs.toLong())) break
+                if (!skipFully(input, fs.toLong())) { positioned = false; break }
             } else if (id in META_FRAMES && fs <= (if (id == "USLT") 1 shl 20 else 65536)) {
                 val d = ByteArray(fs)
-                if (!readFully(input, d)) break
+                if (!readFully(input, d)) { positioned = false; break }
                 frames += Frame(id, d)
-            } else if (!skipFully(input, fs.toLong())) break
+            } else if (!skipFully(input, fs.toLong())) { positioned = false; break }
             consumed += fs
         }
-        return metaFromFrames(frames)
+        val audioStart = 10L + size + (if (flags and 0x10 != 0) 10 else 0)
+        val duration = if (positioned && skipFully(input, audioStart - 10 - consumed)) audioDuration(input, audioStart, fileSize) else null
+        return metaFromFrames(frames, duration)
+    }
+
+    private val MPEG1_L3_KBPS = intArrayOf(0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)
+    private val MPEG2_L3_KBPS = intArrayOf(0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)
+    private val MPEG1_RATES = intArrayOf(44100, 48000, 32000)
+
+    /** Reads the first bytes of the audio from [input] (positioned at its start) and estimates its length; see [durationFromHead]. */
+    private fun audioDuration(input: InputStream, audioStart: Long, fileSize: Long): Long? {
+        val head = ByteArray(4096)
+        var n = 0
+        while (n < head.size) {
+            val r = runCatching { input.read(head, n, head.size - n) }.getOrDefault(-1)
+            if (r < 0) break
+            n += r
+        }
+        return durationFromHead(head, n, if (fileSize > audioStart) fileSize - audioStart else -1)
+    }
+
+    /**
+     * Length of an MP3 from the first Layer III frame in [head] (the first [n] bytes of the audio): a Xing/Info or VBRI header
+     * gives the exact frame count; without one the file is taken as constant bitrate over [audioBytes]. Null if not found.
+     */
+    internal fun durationFromHead(head: ByteArray, n: Int, audioBytes: Long): Long? {
+        for (i in 0 until n - 4) {
+            if (u(head, i) != 0xFF || u(head, i + 1) and 0xE0 != 0xE0) continue
+            val version = (u(head, i + 1) shr 3) and 3 // 0 = 2.5, 2 = 2, 3 = 1
+            val layer = (u(head, i + 1) shr 1) and 3 // 1 = Layer III
+            val bitrateIdx = u(head, i + 2) shr 4
+            val rateIdx = (u(head, i + 2) shr 2) and 3
+            if (version == 1 || layer != 1 || bitrateIdx == 0 || bitrateIdx == 15 || rateIdx == 3) continue
+            val mpeg1 = version == 3
+            val rate = MPEG1_RATES[rateIdx] / (if (mpeg1) 1 else if (version == 2) 2 else 4)
+            val samples = if (mpeg1) 1152 else 576
+            val mono = (u(head, i + 3) shr 6) == 3
+            val xing = i + 4 + (if (mpeg1) (if (mono) 17 else 32) else (if (mono) 9 else 17))
+            val tag = if (xing + 12 <= n) String(head, xing, 4, Charsets.ISO_8859_1) else ""
+            if ((tag == "Xing" || tag == "Info") && u(head, xing + 7) and 1 != 0) {
+                val frames = readU32BE(head, xing + 8)
+                if (frames > 0) return frames * samples * 1000 / rate
+            }
+            val vbri = i + 36
+            if (vbri + 18 <= n && String(head, vbri, 4, Charsets.ISO_8859_1) == "VBRI") {
+                val frames = readU32BE(head, vbri + 14)
+                if (frames > 0) return frames * samples * 1000 / rate
+            }
+            val kbps = (if (mpeg1) MPEG1_L3_KBPS else MPEG2_L3_KBPS)[bitrateIdx]
+            return if (audioBytes > 0) audioBytes * 8 / kbps else null
+        }
+        return null
     }
 
     private fun usltTexts(frames: List<Frame>) = frames.filter { it.id == "USLT" }
@@ -215,7 +270,7 @@ object Id3 {
         }
     }
 
-    private fun metaFromFrames(frames: List<Frame>): Meta {
+    private fun metaFromFrames(frames: List<Frame>, durationMs: Long? = null): Meta {
         // Text frames: encoding byte + text; v2.4 multi-values are NUL separated.
         fun values(id: String): List<String> = frames.filter { it.id == id && it.data.size > 1 }.flatMap {
             decodeText(it.data.copyOfRange(1, it.data.size), u(it.data, 0)).split('\u0000')
@@ -228,6 +283,7 @@ object Id3 {
             lyricsState(frames),
             usltTexts(frames).firstOrNull(),
             frames.any { it.id == "SYLT" } && usltTexts(frames).isEmpty(),
+            durationMs,
         )
     }
 

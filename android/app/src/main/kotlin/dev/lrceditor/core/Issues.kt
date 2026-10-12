@@ -19,26 +19,70 @@ enum class Issue(val label: String, val warning: Boolean = false, val tagIssue: 
     SYLT_ONLY("synced frame only"),
     /** Two timed lines in a row with exactly the same time. Review only. */
     SAME_TIME("same timestamp twice in a row", warning = true, counted = true),
+    /** The last lyric time is later than the song is long. Needs the song's length, so only found when it is known. */
+    PAST_END("timestamp after the end of the song", counted = true),
     /** Marked by hand from the editor menu. Never produced by [Issues.checkSong]; the app adds it from its own list of marks. */
     BROKEN_LYRICS("marked as broken"),
+    /** Marked by hand: something is wrong with the file that the app doesn't check for. Added from the app's own list of marks. */
+    BUGGY_FILE("marked as buggy file"),
     UNREADABLE_LYRICS("lyrics can't be read"),
     /** Tags like [𝟶𝟹:𝟶𝟸.𝟶𝟶] with non-ASCII digits, e.g. left behind by a romanization tool. Review only. */
     ODD_TIMESTAMPS("odd timestamps in text", warning = true, counted = true),
+    /** The first line of the lyrics (after the song info tags) is empty, which is unnecessary. Review only; the Fix list can remove it from all songs. */
+    LEADING_EMPTY("empty line at the start", warning = true),
+    /** An empty line directly after another one. Review only. */
+    CONSECUTIVE_EMPTY("empty lines in a row", warning = true, counted = true),
+    /**
+     * An empty line followed by a lyric line less than the chosen time later (Settings > Editor). Review only. Never in the stored
+     * [Issues.countSong] result: the limit can be changed, so it is worked out from the stored gaps (see [Issues.breakGaps]).
+     */
+    SHORT_BREAK("short break between lyrics", warning = true, counted = true),
 }
 
 /** Problems that sit on a particular line, for jumping to them in the editor. */
-enum class LineProblem { UNTIMED, OUT_OF_ORDER, SAME_TIME, ODD_TIMESTAMPS }
+enum class LineProblem { UNTIMED, OUT_OF_ORDER, SAME_TIME, ODD_TIMESTAMPS, PAST_END, EMPTY_REPEAT, SHORT_BREAK, LEADING_EMPTY }
 
 object Issues {
     /** [issue]'s label with how often it occurs, e.g. "out of order ×3". The number is left out for a single occurrence. */
     fun labelWithCount(issue: Issue, count: Int?): String =
         if (issue.counted && count != null && count > 1) "${issue.label} ×$count" else issue.label
 
-    /** (line id, problem) in line order. A line can appear more than once if it has several problems. */
-    fun lineProblems(lines: List<Line>): List<Pair<Long, LineProblem>> {
+    /** A break (empty line, then lyrics) shorter than this is a warning, unless the user chose another limit. */
+    const val DEFAULT_MIN_BREAK_MS = 300L
+    /** Breaks longer than this are never a warning, so only shorter ones are stored for a song. */
+    const val MAX_BREAK_MS = 3000L
+    /** A lyric time this far past the end of the song still counts as inside it (the length of some files is only estimated). */
+    const val END_TOLERANCE_MS = 1000L
+
+    /** Lengths of the breaks (an empty timed line, then a timed lyric line) shorter than [MAX_BREAK_MS], shortest first, at most [MAX_GAPS]. */
+    fun breakGaps(lines: List<Line>): List<Long> {
+        val out = ArrayList<Long>()
+        for ((a, b) in lines.zipWithNext()) {
+            val from = a.timeMs ?: continue
+            val to = b.timeMs ?: continue
+            if (a.text.isBlank() && b.text.isNotBlank() && to - from < MAX_BREAK_MS) out += maxOf(to - from, 0L)
+        }
+        return out.sorted().take(MAX_GAPS)
+    }
+
+    private const val MAX_GAPS = 200
+
+    /** Stored break lengths ([breakGaps]) of the lyrics text, or none if it isn't synced lyrics. */
+    fun breakGaps(lyricsText: String?): List<Long> =
+        lyricsText?.takeIf { Lrc.looksLikeLrc(it) }?.let { breakGaps(Lrc.parse(it)) }.orEmpty()
+
+    /** How many of the stored [gaps] are shorter than [minBreakMs]. */
+    fun shortBreaks(gaps: List<Long>, minBreakMs: Long) = gaps.count { it < minBreakMs }
+
+    /**
+     * (line id, problem) in line order. A line can appear more than once if it has several problems.
+     * [minBreakMs]: an empty line followed by a lyric line less than that later is a short break (on the empty line).
+     * [durationMs]: the song's length, if known; lines timed after it are past the end.
+     */
+    fun lineProblems(lines: List<Line>, minBreakMs: Long = DEFAULT_MIN_BREAK_MS, durationMs: Long? = null): List<Pair<Long, LineProblem>> {
         val out = ArrayList<Pair<Long, LineProblem>>()
         var prev: Long? = null
-        for (l in lines) {
+        for ((i, l) in lines.withIndex()) {
             val t = l.timeMs
             if (t == null && l.text.isNotBlank()) out += l.id to LineProblem.UNTIMED
             if (t != null) {
@@ -47,13 +91,23 @@ object Issues {
                 prev = t
             }
             if (Lrc.hasOddTimestamps(l.text)) out += l.id to LineProblem.ODD_TIMESTAMPS
+            if (t != null && durationMs != null && durationMs > 0 && t > durationMs + END_TOLERANCE_MS) out += l.id to LineProblem.PAST_END
+            if (l.text.isBlank()) {
+                if (i == 0) out += l.id to LineProblem.LEADING_EMPTY
+                val before = lines.getOrNull(i - 1)
+                val after = lines.getOrNull(i + 1)
+                if (t != null && before?.timeMs != null && before.text.isBlank()) out += l.id to LineProblem.EMPTY_REPEAT
+                val next = after?.timeMs
+                if (t != null && next != null && after.text.isNotBlank() && next - t < minBreakMs) out += l.id to LineProblem.SHORT_BREAK
+            }
         }
         return out
     }
 
     /** The first problem line after [afterId] (wrapping around), optionally only of [kind]. Null if none. */
-    fun nextProblemLine(lines: List<Line>, afterId: Long?, kind: LineProblem? = null): Long? {
-        val ids = lineProblems(lines).filter { kind == null || it.second == kind }.map { it.first }.distinct()
+    fun nextProblemLine(lines: List<Line>, afterId: Long?, kind: LineProblem? = null,
+                        minBreakMs: Long = DEFAULT_MIN_BREAK_MS, durationMs: Long? = null): Long? {
+        val ids = lineProblems(lines, minBreakMs, durationMs).filter { kind == null || it.second == kind }.map { it.first }.distinct()
         if (ids.isEmpty()) return null
         val pos = lines.indexOfFirst { it.id == afterId }
         return ids.firstOrNull { id -> lines.indexOfFirst { it.id == id } > pos } ?: ids.first()
@@ -157,29 +211,33 @@ object Issues {
     private const val MIN_RUN = 3
 
     /** Problems with a song (see [countSong]), without how often each occurs. */
-    fun checkSong(tags: List<String>, lyricsText: String?, syltOnly: Boolean = false): Set<Issue> =
-        countSong(tags, lyricsText, syltOnly).keys.toSet()
+    fun checkSong(tags: List<String>, lyricsText: String?, syltOnly: Boolean = false, durationMs: Long? = null): Set<Issue> =
+        countSong(tags, lyricsText, syltOnly, durationMs).keys.toSet()
 
     /**
      * Problems with a song given its grouping [tags] and the text of its USLT frame ([lyricsText], null if none), each with
      * how often it occurs in the file (1 for those that are about the whole song).
      * [syltOnly]: it has a synced (SYLT) frame but no readable USLT, so its lines aren't checked.
+     * [durationMs]: the song's length if known, for [Issue.PAST_END].
      * Plain (untagged) lyrics are not flagged as untimed: they are simply unsynced.
      */
-    fun countSong(tags: List<String>, lyricsText: String?, syltOnly: Boolean = false): Map<Issue, Int> {
+    fun countSong(tags: List<String>, lyricsText: String?, syltOnly: Boolean = false, durationMs: Long? = null): Map<Issue, Int> {
         val out = linkedMapOf<Issue, Int>()
         if (tags.map(Search::tagKey).count { k -> LearnState.tags.any { Search.tagKey(it) == k } } > 1) out[Issue.CONFLICTING_LEARN_TAGS] = 1
         if (syltOnly) { out[Issue.SYLT_ONLY] = 1; return out }
         val text = lyricsText?.takeIf { it.isNotBlank() }
         if (text != null && Lrc.multiTimestampProblem(text) != null) { out[Issue.UNREADABLE_LYRICS] = 1; return out }
         val lines = text?.let(Lrc::parseAny).orEmpty()
-        val problems = lineProblems(lines)
+        val problems = lineProblems(lines, durationMs = durationMs)
         fun count(k: LineProblem) = problems.count { it.second == k }
         if (text != null && Lrc.hasOddTimestamps(text)) out[Issue.ODD_TIMESTAMPS] = maxOf(1, count(LineProblem.ODD_TIMESTAMPS))
         if (text != null && Lrc.looksLikeLrc(text)) {
             if (!Lrc.isFullyTimed(lines)) out[Issue.UNTIMED_LINES] = Lrc.countUntimed(lines)
             if (hasOutOfOrder(lines)) out[Issue.OUT_OF_ORDER] = count(LineProblem.OUT_OF_ORDER)
             if (hasSameTimeTwice(lines)) out[Issue.SAME_TIME] = count(LineProblem.SAME_TIME)
+            if (count(LineProblem.PAST_END) > 0) out[Issue.PAST_END] = count(LineProblem.PAST_END)
+            if (count(LineProblem.LEADING_EMPTY) > 0) out[Issue.LEADING_EMPTY] = 1
+            if (count(LineProblem.EMPTY_REPEAT) > 0) out[Issue.CONSECUTIVE_EMPTY] = count(LineProblem.EMPTY_REPEAT)
             if (Lrc.hasMetadataInMiddle(text)) out[Issue.DOUBLE_LYRICS] = 1
             // One report per song: the song info in the middle already says it, the times don't need to add it.
             if (Issue.DOUBLE_LYRICS !in out && hasTwoRuns(lines)) out[Issue.DOUBLE_RUNS] = 1

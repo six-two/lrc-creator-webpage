@@ -558,6 +558,86 @@ class IssuesTest {
         assertEquals(listOf(2L to LineProblem.SAME_TIME), Issues.lineProblems(lines))
     }
 
+    @Test fun shortBreaksAreFoundByTheirLength() {
+        val lines = Lrc.parse("[00:05.00]a\n[00:10.00]\n[00:10.20]b\n[00:15.00]\n[00:16.00]c\n[00:20.00]d\n[00:20.10]\n[00:30.00]e")
+        // Only an empty line followed by a lyric line is a break: 0.2 s and 1.0 s here; the last empty line is followed by a lyric 9.9 s later.
+        assertEquals(listOf(200L, 1000L), Issues.breakGaps(lines))
+        assertEquals(1, Issues.shortBreaks(Issues.breakGaps(lines), 300))
+        assertEquals(2, Issues.shortBreaks(Issues.breakGaps(lines), 1500))
+        assertEquals(listOf(lines[1].id to LineProblem.SHORT_BREAK), Issues.lineProblems(lines, 300))
+        assertEquals(listOf(200L, 1000L), Issues.breakGaps("[00:05.00]a\n[00:10.00]\n[00:10.20]b\n[00:15.00]\n[00:16.00]c"))
+        assertTrue(Issues.breakGaps("plain text\n\nmore").isEmpty())
+        // It depends on the setting, so it is never part of the stored result.
+        assertFalse(Issue.SHORT_BREAK in check("Lyrics; Karaoke", "[00:05.00]a\n[00:10.00]\n[00:10.05]b"))
+        assertTrue(Issue.SHORT_BREAK.warning)
+        val entry = SongEntry("u", "f.mp3", "", "", "", emptyList(), 1, 1, breakGapsMs = listOf(200L, 1000L))
+        assertEquals(listOf(Issue.SHORT_BREAK), entry.withMarks(300, emptySet(), emptySet()).issues)
+        assertEquals(1, entry.withMarks(300, emptySet(), emptySet()).counts[Issue.SHORT_BREAK])
+        assertEquals(2, entry.withMarks(5000, emptySet(), emptySet()).counts[Issue.SHORT_BREAK])
+        assertEquals(emptyList<Issue>(), entry.withMarks(100, emptySet(), emptySet()).issues.orEmpty())
+        assertEquals(listOf(Issue.BROKEN_LYRICS, Issue.BUGGY_FILE), entry.withMarks(100, setOf("u"), setOf("u")).issues)
+    }
+
+    @Test fun emptyLineAtTheStartIsAWarningAndCanBeRemoved() {
+        assertTrue(Issue.LEADING_EMPTY.warning)
+        assertEquals(setOf(Issue.LEADING_EMPTY), check("Lyrics; Karaoke", "[ti:T]\n[00:00.50]\n[00:05.00]a\n[00:10.00]b"))
+        assertFalse(Issue.LEADING_EMPTY in check("Lyrics; Karaoke", "[ti:T]\n[00:05.00]a\n[00:08.00]\n[00:10.00]b"))
+        assertEquals("[ti:T]\n[00:05.00]a\n[00:10.00]b", Lrc.removeLeadingEmpty("[ti:T]\n[00:00.50]\n\n[00:02.00]  \n[00:05.00]a\n[00:10.00]b"))
+        assertEquals("[00:05.00]a", Lrc.removeLeadingEmpty("\n[00:01.00]\n[00:05.00]a"))
+        assertEquals("[ar:X]\n[00:05.00]a", Lrc.removeLeadingEmpty("[00:01.00]\n[ar:X]\n[00:05.00]a"))
+        assertNull(Lrc.removeLeadingEmpty("[ti:T]\n[00:05.00]a\n[00:08.00]\n[00:10.00]b"))
+        // A timestamp alone on its line with its text on the next line is not empty.
+        assertNull(Lrc.removeLeadingEmpty("[00:05.00]\ncontinued\n[00:10.00]b"))
+        val fixed = Lrc.removeLeadingEmpty("[ti:T]\n[00:00.50]\n[00:05.00]a\n[00:10.00]b")!!
+        assertFalse(Issue.LEADING_EMPTY in check("Lyrics; Karaoke", fixed))
+    }
+
+    @Test fun consecutiveEmptyLinesAreAWarning() {
+        assertTrue(Issue.CONSECUTIVE_EMPTY.warning)
+        val src = "[00:05.00]a\n[00:10.00]\n[00:11.00]\n[00:12.00]\n[00:20.00]b"
+        assertEquals(2, counts("Lyrics; Karaoke", src)[Issue.CONSECUTIVE_EMPTY])
+        assertFalse(Issue.CONSECUTIVE_EMPTY in check("Lyrics; Karaoke", "[00:05.00]a\n[00:10.00]\n[00:20.00]b\n[00:25.00]"))
+        // Blank lines in the file between timed lines are not entries.
+        assertFalse(Issue.CONSECUTIVE_EMPTY in check("Lyrics; Karaoke", "[00:05.00]a\n\n\n[00:20.00]b"))
+    }
+
+    @Test fun lastTimeAfterTheEndOfTheSongIsAnError() {
+        assertFalse(Issue.PAST_END.warning)
+        val src = "[00:05.00]a\n[03:00.00]b\n[03:10.00]c"
+        assertEquals(setOf(Issue.PAST_END), Issues.checkSong(listOf("Lyrics", "Karaoke"), src, durationMs = 185_000))
+        assertEquals(2, Issues.countSong(listOf("Lyrics", "Karaoke"), src, durationMs = 120_000)[Issue.PAST_END])
+        // A second of slack, and nothing when the length is unknown.
+        assertEquals(emptySet<Issue>(), Issues.checkSong(listOf("Lyrics", "Karaoke"), src, durationMs = 190_000))
+        assertEquals(emptySet<Issue>(), Issues.checkSong(listOf("Lyrics", "Karaoke"), src, durationMs = null))
+        val lines = Lrc.parse(src)
+        assertEquals(listOf(lines[2].id to LineProblem.PAST_END), Issues.lineProblems(lines, durationMs = 185_000))
+    }
+
+    @Test fun creditsBlockInTheMiddleIsOutOfOrderNotTwoLyrics() {
+        // OWEN 495: one lyric whose two credit lines are timed at the start but sit in the middle.
+        val src = "[ti:T]\n[ar:A]\n[00:10.00]a\n[00:20.00]b\n[00:30.00]c\n[00:40.00]d\n[02:09.00]\n[00:00.84]credit 1\n[00:01.24]credit 2\n" +
+            "[02:27.00]e\n[02:37.00]f\n[02:43.00]g\n[02:46.00]h\n[02:50.00]i\n[03:00.00]\n[03:09.00]j\n[03:12.00]k\n[03:17.00]l"
+        assertEquals(setOf(Issue.OUT_OF_ORDER), check("Lyrics; Karaoke", src))
+    }
+
+    @Test fun mp3LengthFromTheFirstFrame() {
+        val frame = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x00) // MPEG1 Layer III, 128 kbit/s, 44.1 kHz, stereo
+        val cbr = ByteArray(4096).also { frame.copyInto(it) }
+        assertEquals(1000L, Id3.durationFromHead(cbr, cbr.size, 16000))
+        assertNull(Id3.durationFromHead(cbr, cbr.size, -1))
+        val xing = ByteArray(4096).also { frame.copyInto(it); "Xing".toByteArray().copyInto(it, 36); it[43] = 1; it[47] = 100 }
+        assertEquals(100L * 1152 * 1000 / 44100, Id3.durationFromHead(xing, xing.size, 999999))
+        assertNull(Id3.durationFromHead(ByteArray(100), 100, 5000))
+        // Read through the tag reader: an ID3 header with one title frame, padding, then the audio.
+        val title = byteArrayOf(3) + "Hi".toByteArray()
+        val tag = "TIT2".toByteArray() + byteArrayOf(0, 0, 0, title.size.toByte(), 0, 0) + title + ByteArray(20)
+        val file = byteArrayOf(0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, tag.size.toByte()) + tag + cbr.copyOf(16000)
+        val meta = Id3.readMeta(file.inputStream(), file.size.toLong())
+        assertEquals("Hi", meta.title)
+        assertEquals(1000L, meta.durationMs)
+        assertNull(Id3.readMeta(file.inputStream()).durationMs)
+    }
+
     @Test fun conflictingAndSylt() {
         assertEquals(setOf(Issue.CONFLICTING_LEARN_TAGS), check("Learn; unsingable", null))
         assertEquals(setOf(Issue.SYLT_ONLY), check("", null, sylt = true))

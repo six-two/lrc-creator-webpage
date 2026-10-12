@@ -24,3 +24,9 @@ Gradle and the Android SDK installed:
 
 - Opened files are copied into app-private storage (`current.mp3`), so session resume needs no URI permission
   (share-intent URIs only carry a temporary grant). Exports go through the system "save as" picker.
+
+## Troubleshooting files and logs
+
+- **Flagged songs.** Songs the user marked in the editor menu ("Mark file as buggy", "Mark lyrics as broken") are listed with their full path, title, tags and problems on every app start and whenever a mark changes. Read them with `adb logcat -d -s LrcFlagged`, or `adb shell cat /sdcard/Android/data/dev.lrceditor/files/lrc-flagged-files.txt`. Then `adb pull` the file to look at it.
+- **Debug log.** Settings > Library > Export debug log writes every song with problems to `/sdcard/Android/data/dev.lrceditor/files/lrc-debug-log.json`.
+- **Lyrics fetching.** A failed fetch logs the exception and the network state (DNS servers, Private DNS, validated) to logcat: `adb logcat -d -s LyricsFetch`.

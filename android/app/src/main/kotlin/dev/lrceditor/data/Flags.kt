@@ -9,9 +9,9 @@ import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.io.File
 
-/** Songs the user marked by hand as having broken lyrics. Kept outside the library index so a rescan never drops them. */
-class FlagStore(context: Context) {
-    private val file = File(context.filesDir, "broken-lyrics.json")
+/** Songs the user marked by hand (as having broken lyrics, or as buggy files), kept in [fileName]. Kept outside the library index so a rescan never drops them. */
+class FlagStore(context: Context, fileName: String = "broken-lyrics.json") {
+    private val file = File(context.filesDir, fileName)
     private val codec = Json { ignoreUnknownKeys = true }
     private val ser = SetSerializer(String.serializer())
 
