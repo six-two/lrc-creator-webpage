@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import dev.lrceditor.core.Ignore
+import dev.lrceditor.core.Realign
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -52,6 +53,8 @@ data class Settings(
     val tickVolume: Float = 0.6f,
     val nudgeMs: Long = 100,
     val autoAdvance: Boolean = true,
+    /** How many of the first lines are timed again in realign mode. */
+    val realignLines: Int = Realign.DEFAULT_LINES,
     /** Ask before writing lyrics into the original MP3 in place. */
     val confirmOverwrite: Boolean = true,
     /** SAF tree URI of the music folder, or null if not chosen yet. */
@@ -83,6 +86,7 @@ class SettingsStore(private val context: Context) {
         val tickVol = floatPreferencesKey("tick_volume")
         val nudge = longPreferencesKey("nudge_ms")
         val auto = booleanPreferencesKey("auto_advance")
+        val realignLines = intPreferencesKey("realign_lines")
         val confirmOverwrite = booleanPreferencesKey("confirm_overwrite")
         val root = stringPreferencesKey("library_root")
         val ignored = stringPreferencesKey("ignored_folders")
@@ -105,6 +109,7 @@ class SettingsStore(private val context: Context) {
             tickVolume = p[K.tickVol] ?: 0.6f,
             nudgeMs = p[K.nudge] ?: 100,
             autoAdvance = p[K.auto] ?: true,
+            realignLines = (p[K.realignLines] ?: Realign.DEFAULT_LINES).coerceIn(1, Realign.MAX_LINES),
             confirmOverwrite = p[K.confirmOverwrite] ?: true,
             libraryRoot = p[K.root],
             showArtistAlbum = p[K.showArtistAlbum] ?: true,
@@ -125,7 +130,7 @@ class SettingsStore(private val context: Context) {
     suspend fun save(s: Settings) {
         context.dataStore.edit { p ->
             p[K.tick] = s.tickEnabled; p[K.tickVol] = s.tickVolume; p[K.nudge] = s.nudgeMs
-            p[K.auto] = s.autoAdvance; p[K.confirmOverwrite] = s.confirmOverwrite
+            p[K.auto] = s.autoAdvance; p[K.realignLines] = s.realignLines; p[K.confirmOverwrite] = s.confirmOverwrite
             p[K.ignored] = s.ignoredFolders.joinToString("\n")
             p[K.ignoredFiles] = s.ignoredFiles.joinToString("\n")
             p[K.showArtistAlbum] = s.showArtistAlbum; p[K.showTags] = s.showTags; p[K.showLyrics] = s.showLyrics

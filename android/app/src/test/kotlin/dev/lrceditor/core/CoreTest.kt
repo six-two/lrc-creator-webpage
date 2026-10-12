@@ -285,6 +285,7 @@ class GroupingWriteTest {
 }
 
 class IssuesTest {
+    private fun counts(tags: String, lyrics: String?) = Issues.countSong(Search.parseTags(tags), lyrics)
     private fun check(tags: String, lyrics: String?, sylt: Boolean = false) = Issues.checkSong(Search.parseTags(tags), lyrics, sylt)
 
     @Test fun cleanSong() {
@@ -296,8 +297,8 @@ class IssuesTest {
     @Test fun untimedAndMismatch() {
         val r = check("Lyrics; Karaoke", "[00:01.00]a\n[00:00.00]b")
         assertEquals(setOf(Issue.UNTIMED_LINES, Issue.UNDESERVED_KARAOKE_TAG), r)
-        assertEquals(1, Issues.untimedCount("[00:01.00]a\n[00:00.00]b"))
-        assertEquals(0, Issues.untimedCount("plain words"))
+        assertEquals(1, counts("Lyrics; Karaoke", "[00:01.00]a\n[00:00.00]b")[Issue.UNTIMED_LINES])
+        assertNull(counts("Lyrics", "plain words")[Issue.UNTIMED_LINES])
     }
 
     @Test fun specificTagIssues() {
@@ -349,22 +350,42 @@ class IssuesTest {
         assertEquals(emptyList<Issue>(), doubles("[00:01.00]\n[ar:A]\n[00:02.00]\n$body"))
     }
 
-    @Test fun translationBlockWithTheSameTimesIsNotDoubleLyrics() {
+    @Test fun translationBlockOnTheSameTimesIsADoubleLyrics() {
         val head = "[ti:T]\n[ar:A]\n[offset:+0]\n[by:Tool]\n"
         val jp = "[00:05.00]jp1\nromaji1\n[00:10.00]jp2\nromaji2\n[00:15.00]jp3\nromaji3"
         val cn = "[by:translator]\n[00:05.00]cn1\nromaji1\n[00:10.00]cn2\nromaji2\n[00:15.00]cn3\nromaji3"
-        // the first line has several timestamps, so everything is sorted by time and the pairs end up next to each other
-        val sorted = "$head[00:01.00][00:20.00]\n$jp\n\n$cn"
-        assertEquals(setOf(Issue.SAME_TIME), check("Lyrics; Karaoke", sorted))
-        assertNull(Lrc.secondCopyStart(sorted))
-        // without that, the second block just follows the first
-        val plain = "$head$jp\n\n$cn"
-        assertEquals(emptyList<Issue>(), doubles(plain))
-        assertTrue(Issue.OUT_OF_ORDER in check("Lyrics; Karaoke", plain))
-        // a translation that skips a line still has the same times
-        assertNull(Lrc.secondCopyStart("$head$jp\n[by:x]\n[00:05.00]cn1\n[00:10.00]cn2"))
-        // but a second block with other times is a second sync
+        // a second block after the song info, on the same times but another text (a translation of its own)
+        val sameTimes = "$head$jp\n\n$cn"
+        assertEquals(3, Lrc.secondCopyStart(sameTimes))
+        assertEquals(listOf(Issue.DOUBLE_LYRICS), doubles(sameTimes))
+        assertEquals(listOf(Issue.DOUBLE_LYRICS), doubles("$head$jp\n[by:x]\n[00:05.00]cn1\n[00:10.00]cn2"))
+        // the same without the song info in between: two runs on the same times
+        val noInfo = "$head$jp\n\n" + cn.lines().drop(1).joinToString("\n")
+        assertEquals(listOf(Issue.DOUBLE_RUNS), doubles(noInfo))
+        assertTrue(Issue.OUT_OF_ORDER in check("Lyrics; Karaoke", sameTimes))
+        // and a second block with other times is a second sync
         assertEquals(listOf(Issue.DOUBLE_LYRICS), doubles("$head$jp\n[by:x]\n[00:06.00]cn1\n[00:11.50]cn2\n[00:16.00]cn3"))
+    }
+
+    /** Shape of "Better Off Dead": original with romanization, then a translation block with its own [by:] on the same times. */
+    @Test fun songWithTranslationBlockAfterItIsNotJustOutOfOrder() {
+        val times = listOf("00:13.53", "00:19.38", "00:24.17", "00:25.99", "00:29.12", "00:32.23", "00:35.25", "00:44.65")
+        val original = "[ti:Song]\n[ar:Band]\n[by:Tool]\n" + times.withIndex().joinToString("\n") { (i, t) -> "[$t]original $i\nromanized $i" }
+        val translation = "\n\n\n[by:someone]\n" + times.withIndex().joinToString("\n") { (i, t) -> "[$t] translated $i  \nromanized again $i" }
+        val found = check("Lyrics; Karaoke", original + translation)
+        assertEquals(setOf(Issue.OUT_OF_ORDER, Issue.DOUBLE_LYRICS), found)
+        val lines = Lrc.parse(original + translation)
+        val hint = lines[Lrc.secondCopyStart(original + translation)!!].id
+        val (first, second) = Issues.splitDouble(lines, hint)!!
+        assertEquals(times.size, first.size)
+        assertEquals(times.size, second.size)
+        assertTrue(first.all { it.text.startsWith("original") })
+        assertTrue(second.all { it.text.startsWith("translated") })
+    }
+
+    @Test fun lineSungTwiceWithTheSameTimeInOneBlockIsNotAnotherBlock() {
+        val song = "[ti:T]\n[00:05.00]a\n[00:05.00]b\n[00:10.00]c\n[00:15.00]d\n[by:credit]"
+        assertEquals(emptyList<Issue>(), doubles(song))
     }
 
     @Test fun repeatedChorusWithAscendingTimesIsNotDoubleLyrics() {
@@ -393,6 +414,123 @@ class IssuesTest {
         assertEquals(listOf(Issue.DOUBLE_RUNS), doubles("$a\n[00:12.00]a\n[00:22.00]b\n[00:32.00]c\n[00:43.00]d"))
         // a second copy that is a translation (different text) is not detected by the times alone
         assertEquals(emptyList<Issue>(), doubles("$a\n[00:12.00]x\n[00:22.00]y\n[00:32.00]z\n[00:43.00]w"))
+    }
+
+    /** The same lyrics twice, with identical timestamps in both copies. */
+    @Test fun lyricsRepeatedWithTheSameTimestampsAreDoubleLyrics() {
+        val body = "[00:10.00]a\n[00:20.00]b\n[00:30.00]c"
+        val long = (1..8).joinToString("\n") { "[00:%02d.00]line $it".format(it * 5) }
+        val doubledLines = (1..8).joinToString("\n") { "[00:%02d.00]line $it\n[00:%02d.00]line $it".format(it * 5, it * 5) }
+        val cases = mapOf(
+            "one copy after the other" to "$body\n$body",
+            "longer song" to "$long\n$long",
+            "CRLF and blank lines" to "$long\r\n\r\n$long\r\n",
+            "song info repeated in between" to "[ar:X]\n[ti:Y]\n$long\n[ar:X]\n[ti:Y]\n$long",
+            "short, info repeated" to "[ar:X]\n$body\n[ar:X]\n$body",
+            "capitals, punctuation and pauses" to "[00:05.00]\n$long\n[00:50.00]\n" + long.uppercase() + "!",
+            "every line twice in a row" to doubledLines,
+            "three copies" to "$long\n$long\n$long",
+        )
+        val missed = cases.filter { (_, lrc) -> doubles(lrc).isEmpty() }.keys
+        assertEquals(emptySet<String>(), missed)
+    }
+
+    @Test fun otherTextOnTheSameTimesIsOneMoreLyricButASungRepeatIsNot() {
+        val long = (1..8).joinToString("\n") { "[00:%02d.00]line $it".format(it * 5) }
+        val translated = (1..8).joinToString("\n") { "[00:%02d.00]Zeile $it".format(it * 5) }
+        assertEquals(listOf(Issue.DOUBLE_RUNS), doubles("$long\n$translated"))
+        assertEquals(listOf(Issue.DOUBLE_LYRICS), doubles("[ar:X]\n$long\n[ar:X]\n$translated"))
+        // a line sung twice in a row is not a copy of the song
+        assertEquals(emptyList<Issue>(), doubles("[00:05.00]a\n[00:05.00]a\n[00:10.00]b\n[00:15.00]c\n[00:20.00]d\n[00:25.00]e"))
+    }
+
+    @Test fun interleavedCopiesCanBeSplitForComparing() {
+        val lines = (1..4).flatMap { listOf(Line(it * 2L, it * 5000L, "line $it"), Line(it * 2L + 1, it * 5000L, "line $it")) }
+        val (first, second) = Issues.splitDouble(lines, null)!!
+        assertEquals(listOf(2L, 4L, 6L, 8L), first.map { it.id })
+        assertEquals(listOf(3L, 5L, 7L, 9L), second.map { it.id })
+        // lines that have no copy are in both, so either choice is a whole song
+        val withPause = listOf(Line(100, null, "")) + lines
+        val (a, b) = Issues.splitDouble(withPause, null)!!
+        assertEquals(100L, a.first().id)
+        assertEquals(100L, b.first().id)
+    }
+
+    @Test fun countsTellHowOftenEachProblemOccurs() {
+        val lrc = "[00:10.00]a\n[00:10.00]b\n[00:10.00]c\n[00:05.00]d\n[00:00.00]e\n[00:00.00]f\n[00:20.00]g"
+        val c = counts("Lyrics; Karaoke", lrc)
+        assertEquals(2, c[Issue.UNTIMED_LINES])
+        assertEquals(1, c[Issue.OUT_OF_ORDER])
+        assertEquals(2, c[Issue.SAME_TIME])
+        assertEquals(check("Lyrics; Karaoke", lrc), c.keys)
+        // whole-song problems count once
+        assertEquals(1, counts("", "[00:01.00]a")[Issue.MISSING_LYRICS_TAG])
+        assertEquals(1, counts("Learn; unsingable", null)[Issue.CONFLICTING_LEARN_TAGS])
+        assertEquals(mapOf(Issue.OUT_OF_ORDER to 3), counts("Lyrics; Karaoke", "[00:30.00]a\n[00:20.00]b\n[00:10.00]c\n[00:05.00]d"))
+        assertEquals(3, counts("Lyrics", "[𝟶𝟹:𝟶𝟸.𝟶𝟶]a\n[𝟶𝟹:𝟶𝟸.𝟶𝟶]b\n[𝟶𝟹:𝟶𝟸.𝟶𝟶]c")[Issue.ODD_TIMESTAMPS])
+    }
+
+    @Test fun countLabels() {
+        assertEquals("untimed lines ×4", Issues.labelWithCount(Issue.UNTIMED_LINES, 4))
+        assertEquals("untimed lines", Issues.labelWithCount(Issue.UNTIMED_LINES, 1))
+        assertEquals("untimed lines", Issues.labelWithCount(Issue.UNTIMED_LINES, null))
+        assertEquals("Lyrics tag missing", Issues.labelWithCount(Issue.MISSING_LYRICS_TAG, 5))
+        val song = SongEntry("u", "f.mp3", "", "", "", emptyList(), 0, 0, issues = listOf(Issue.SAME_TIME, Issue.OUT_OF_ORDER),
+            counts = mapOf(Issue.SAME_TIME to 7, Issue.OUT_OF_ORDER to 1))
+        assertEquals(listOf("same timestamp twice in a row ×7", "out of order"), song.issueLabels)
+    }
+
+    @Test fun realignOffsetIsTheMiddleDifference() {
+        assertEquals(0L, Realign.offset(emptyList()))
+        assertEquals(1500L, Realign.offset(listOf(10_000L to 11_500L)))
+        // one mistimed tap doesn't move the result
+        assertEquals(2000L, Realign.offset(listOf(1000L to 3000L, 2000L to 4000L, 3000L to 5000L, 4000L to 20_000L, 5000L to 7000L)))
+        assertEquals(-500L, Realign.offset(listOf(10_000L to 9_500L, 20_000L to 19_500L)))
+        // even count: the mean of the two middle ones
+        assertEquals(1500L, Realign.offset(listOf(0L to 1000L, 0L to 2000L)))
+        assertEquals(0L, Realign.spread(listOf(0L to 1000L, 5L to 1005L), 1000))
+        assertEquals(300L, Realign.spread(listOf(0L to 1000L, 0L to 1300L), 1000))
+    }
+
+    @Test fun realignShiftsEveryTimedLine() {
+        val lines = listOf(Line(1, 5000, "a"), Line(2, null, "b"), Line(3, 7000, ""), Line(4, 20, "c"))
+        assertEquals(listOf<Long?>(6500L, null, 8500L, 1520L), Realign.shift(lines, 1500).map { it.timeMs })
+        assertEquals(listOf("a", "b", "", "c"), Realign.shift(lines, 1500).map { it.text })
+        // never below the smallest real time, so lines don't turn untimed
+        assertEquals(listOf<Long?>(3500L, null, 5500L, Lrc.MIN_TIME_MS), Realign.shift(lines, -1500).map { it.timeMs })
+        assertEquals(lines, Realign.shift(lines, 0))
+        assertEquals("+1.25 s", Realign.formatOffset(1250))
+        assertEquals("−0.30 s", Realign.formatOffset(-300))
+    }
+
+    @Test fun realignTimesTheFirstLinesThatHaveATime() {
+        val lines = listOf(Line(1, null, "untimed"), Line(2, 1000, ""), Line(3, 2000, "a"), Line(4, 3000, "b"), Line(5, 4000, "c"))
+        assertEquals(listOf(3L, 4L), Realign.targets(lines, 2).map { it.id })
+        assertEquals(listOf(3L, 4L, 5L), Realign.targets(lines, 5).map { it.id })
+        assertEquals(listOf(3L), Realign.targets(lines, 0).map { it.id })
+        assertEquals(emptyList<Line>(), Realign.targets(listOf(Line(1, null, "a")), 5))
+    }
+
+    @Test fun backGoesToTheLastUsedTab() {
+        val h = TabHistory<String>()
+        assertFalse(h.canGoBack)
+        assertNull(h.back())
+        // library -> editor (opened a song) -> settings -> back is the editor, then the library
+        h.moved("library", "editor"); h.moved("editor", "settings")
+        assertEquals("editor", h.back())
+        assertEquals("library", h.back())
+        assertNull(h.back())
+        assertFalse(h.canGoBack)
+    }
+
+    @Test fun backSkipsTabsAlreadyVisitedAndStaysUnique() {
+        val h = TabHistory<String>()
+        h.moved("library", "editor"); h.moved("editor", "library"); h.moved("library", "editor"); h.moved("editor", "learn")
+        assertEquals("editor", h.back())
+        assertEquals("library", h.back())
+        assertNull(h.back())
+        h.moved("a", "a")
+        assertFalse(h.canGoBack)
     }
 
     @Test fun splitsTwoLyrics() {

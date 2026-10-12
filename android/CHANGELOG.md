@@ -2,6 +2,17 @@
 
 High-level, human-readable list of what changed in the Android app. Newest version first.
 
+## 0.0.5
+
+- The app now needs Android 16 or newer (it no longer installs on older versions), so it behaves the same on every supported phone.
+- New Realign mode (editor menu > Realign timings): when a whole song is early or late, play it and tap Set when each of the first few lines is actually sung. The app then shows how far off each was and moves every line of the song by the middle value (so one bad tap doesn't matter). Undo brings the old times back. How many lines you time (default 5) is set in Settings > Editor.
+- The Fix list and the editor now show how often each problem occurs in the song, e.g. "out of order ×3" or "same timestamp twice in a row ×7".
+- Editor: a line with exactly the same time as the line before it now has a warning at its end.
+- Fixed: lyrics that are in the file twice with the same timestamps (a b c, a b c) are flagged as "two lyrics in one" again, also when each line is twice in a row. 
+- Fixed: the Back button goes to the tab you used last (for example Settings > Back > Editor > Back > Library) instead of only returning to the editor.
+- Fixed: a second block of lyrics after the first (for example a translation under its own [by:...] tag) is now flagged as "two lyrics in one" even when it uses exactly the same times, instead of only "out of order". This also applies when the second block has no song info in front of it, as long as it is on (nearly) the same times. Songs with song info in the middle are reported once, not under both "two lyrics in one" problems.
+- The library data version went up (to 4) because the index now stores the counts and the check changed, so the app rescans all songs in the background once.
+
 ## 0.0.4
 
 - New problems "two lyrics in one (tags in the middle)" and "two lyrics in one (times start over)" in the Fix list. The first is flagged when song info like [ar:...] or [ti:...] sits between lyric lines (credits at the end, other tags like [offset:0] before the lyrics, and a second block with the same times as the first, as in lyrics with a translation, are ignored). The second when the times run up, jump back near the start and run up again with mostly the same text (two synced lyrics pasted one after the other). Songs with synced lyrics are re-read once to find these.

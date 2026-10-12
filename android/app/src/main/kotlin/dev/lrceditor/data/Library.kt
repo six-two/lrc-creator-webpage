@@ -44,9 +44,11 @@ data class SongEntry(
     val lyrics: LyricsState = LyricsState.UNKNOWN,
     /** Problems found when the file was read. null = indexed before this existed (forces one re-read). */
     val issues: List<Issue>? = null,
-    /** Number of untimed lines, for the [Issue.UNTIMED_LINES] label. */
-    val untimed: Int = 0,
+    /** How often each of the [issues] occurs in the file (see [Issues.countSong]). */
+    val counts: Map<Issue, Int> = emptyMap(),
 ) {
+    /** Each problem as shown in the lists, with how often it occurs where that is more than once. */
+    val issueLabels get() = issues.orEmpty().map { Issues.labelWithCount(it, counts[it]) }
     val displayTitle get() = title.ifBlank { Lrc.baseName(fileName) }
     /** Path below the music folder, e.g. `Artist/Album/Song.mp3` (derived from the document URI). */
     val relPath get() = DocPath.relativePath(uri) ?: fileName
@@ -61,7 +63,7 @@ data class LibraryIndex(val root: String, val builtAt: Long, val songs: List<Son
 @Serializable
 data class DebugSong(
     val relPath: String, val title: String, val artist: String, val lyrics: LyricsState,
-    val tags: List<String>, val issues: List<Issue>, val untimed: Int,
+    val tags: List<String>, val issues: List<Issue>, val counts: Map<Issue, Int>,
 )
 
 @Serializable
@@ -105,7 +107,7 @@ class LibraryRepository(private val context: Context) {
         val export = DebugExport(
             appVersion, idx.version, idx.builtAt, idx.songs.size,
             flagged.flatMap { it.issues.orEmpty() }.groupingBy { it.name }.eachCount().toSortedMap(),
-            flagged.sortedBy { it.relPath }.map { DebugSong(it.relPath, it.title, it.artist, it.lyrics, it.tags, it.issues.orEmpty(), it.untimed) },
+            flagged.sortedBy { it.relPath }.map { DebugSong(it.relPath, it.title, it.artist, it.lyrics, it.tags, it.issues.orEmpty(), it.counts) },
         )
         dir.mkdirs()
         File(dir, "lrc-debug-log.json").also { it.writeText(prettyCodec.encodeToString(DebugExport.serializer(), export)) }
@@ -203,14 +205,13 @@ class LibraryRepository(private val context: Context) {
                 else gate.withPermit {
                     val meta = runCatching { resolver.openInputStream(uri)?.use { Id3.readMeta(it) } }.getOrNull()
                     val tags = Search.parseTags(meta?.grouping.orEmpty())
+                    // A song whose lyrics can't be checked must never abort the whole scan.
+                    val counts = meta?.let { m ->
+                        runCatching { Issues.countSong(tags, m.lyricsText, m.syltOnly) }
+                            .onFailure { Log.e(TAG, "Could not check ${c.name}", it) }.getOrDefault(emptyMap())
+                    } ?: emptyMap()
                     SongEntry(key, c.name, meta?.title.orEmpty(), meta?.artist.orEmpty(), meta?.album.orEmpty(),
-                        tags, c.size, c.modified, meta?.lyrics ?: LyricsState.UNKNOWN,
-                        issues = meta?.let { m ->
-                            // A song whose lyrics can't be checked must never abort the whole scan.
-                            runCatching { Issues.checkSong(tags, m.lyricsText, m.syltOnly).toList() }
-                                .onFailure { Log.e(TAG, "Could not check ${c.name}", it) }.getOrDefault(emptyList())
-                        } ?: emptyList(),
-                        untimed = runCatching { Issues.untimedCount(meta?.lyricsText) }.getOrDefault(0))
+                        tags, c.size, c.modified, meta?.lyrics ?: LyricsState.UNKNOWN, counts.keys.toList(), counts)
                 }
                 val n = done.incrementAndGet()
                 if (n % 25 == 0 || n == total) _scan.value = ScanState(true, n, total)
@@ -286,7 +287,7 @@ class LibraryRepository(private val context: Context) {
          * be used as is: a field is added, removed or changes meaning, or [Issues.checkSong] gains or changes a check. The app
          * then rebuilds the index with a full rescan in the background on the next start.
          */
-        const val DATA_VERSION = 2L
+        const val DATA_VERSION = 4L
         const val READ_PARALLELISM = 8
         const val LIST_PARALLELISM = 8
         const val MAX_AGE_MS = 2L * 24 * 60 * 60 * 1000

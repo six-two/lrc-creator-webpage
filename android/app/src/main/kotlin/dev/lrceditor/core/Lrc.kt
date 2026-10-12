@@ -85,18 +85,14 @@ object Lrc {
 
     /**
      * Number of entries before the middle ID tag that starts a second copy (see [midMetadataAt]), or null if there is none.
-     * A second block with (nearly) the same times as the first is not a second sync but the same lyrics with a translation or
-     * romanization after each line, so it doesn't count.
+     * The second block counts even when it has the same times as the first (the same lyrics again, or a translation of them
+     * as a block of its own): a song should only hold one lyric.
      */
     fun secondCopyStart(text: String): Int? {
         val raw = text.split(NEWLINE_RE)
         val at = midMetadataAt(raw) ?: return null
         val first = parse(raw.take(at).joinToString("\n"))
-        if (first.isEmpty()) return null
-        val firstTimes = first.mapNotNull { it.timeMs }.toSet()
-        val second = parse(raw.drop(at).joinToString("\n")).mapNotNull { it.timeMs }
-        if (second.isNotEmpty() && second.count { it in firstTimes } * 10 >= second.size * 8) return null
-        return first.size
+        return first.size.takeIf { it > 0 }
     }
 
     fun looksLikeLrc(text: String) = TAG_RE.containsMatchIn(text)

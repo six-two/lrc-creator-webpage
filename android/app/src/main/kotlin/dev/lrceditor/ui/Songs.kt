@@ -270,8 +270,6 @@ internal fun LearnStateItems(current: LearnState, onPick: (LearnState) -> Unit) 
     }
 }
 
-internal fun issueLabels(s: SongEntry) = s.issues.orEmpty().map { if (it == Issue.UNTIMED_LINES) "${s.untimed} untimed" else it.label }
-
 @Composable
 internal fun SongRow(
     s: SongEntry, cfg: Settings, filter: LyricsFilter, showIssues: Boolean = false,
@@ -284,7 +282,7 @@ internal fun SongRow(
             val sub = listOf(s.artist, s.album).filter { it.isNotBlank() }.joinToString(" · ")
             if (cfg.showArtistAlbum && sub.isNotEmpty()) Text(sub, color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
             if (cfg.showTags && s.tags.isNotEmpty()) Text(s.tags.joinToString(" · "), color = Studio.Teal, style = MaterialTheme.typography.labelSmall)
-            if (showIssues) Text(issueLabels(s).joinToString(" · "), color = Studio.Warn, style = MaterialTheme.typography.labelSmall)
+            if (showIssues) Text(s.issueLabels.joinToString(" · "), color = Studio.Warn, style = MaterialTheme.typography.labelSmall)
             // With a specific lyrics filter every row has the same state, so showing it would be noise.
             if (cfg.showLyrics && (filter == LyricsFilter.ALL || filter == LyricsFilter.ANY)) {
                 val lyrics = when (s.lyrics) {

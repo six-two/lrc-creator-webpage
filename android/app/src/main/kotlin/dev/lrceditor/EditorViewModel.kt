@@ -31,7 +31,9 @@ import dev.lrceditor.core.Lrc
 import dev.lrceditor.core.LyricsFilter
 import dev.lrceditor.core.LyricsState
 import dev.lrceditor.core.NameField
+import dev.lrceditor.core.Realign
 import dev.lrceditor.core.Search
+import dev.lrceditor.core.TabHistory
 import dev.lrceditor.core.TagCount
 import dev.lrceditor.data.*
 import dev.lrceditor.data.lyrics.*
@@ -67,6 +69,13 @@ data class FileInfo(
     val bitrateKbps: Int?, val sampleRateHz: Int?, val durationMs: Long?, val id3Version: String?,
     val cover: Bitmap?,
 )
+
+/** Realign mode: the lines being timed again ([targets]) and the times tapped for them so far, in order. */
+data class RealignState(val targets: List<Line>, val taken: List<Long> = emptyList(), val finished: Boolean = false) {
+    val current get() = targets.getOrNull(taken.size)
+    val pairs get() = targets.zip(taken).map { (l, t) -> l.timeMs!! to t }
+    val offset get() = Realign.offset(pairs)
+}
 
 data class UiState(
     val loaded: Boolean = false,
@@ -104,6 +113,7 @@ data class UiState(
     val lyricsError: String? = null,
     /** The app has only read access to the music folder; a popup asks to choose it again. */
     val folderReadOnly: Boolean = false,
+    val realign: RealignState? = null,
 ) {
     val learn get() = Search.learnStateOf(tags)
 }
@@ -347,7 +357,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update {
             it.copy(loaded = true, fileName = name, lines = lines, selectedId = lines.firstOrNull()?.id,
                 playingId = null, editingTextId = null, editingTimeId = null, dirty = dirty, speed = 1f,
-                canUndo = false, canRedo = false, tags = sessionTags(), fetch = null, rawLyrics = null, lyricsError = null)
+                canUndo = false, canRedo = false, tags = sessionTags(), fetch = null, realign = null, rawLyrics = null, lyricsError = null)
         }
         player.setMediaItem(MediaItem.fromUri(Uri.fromFile(sessions.audioFile)))
         player.setPlaybackParameters(PlaybackParameters(1f))
@@ -458,6 +468,45 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val idx = s.lines.indexOfFirst { it.id == id }
             s.lines.getOrNull(idx + 1)?.let { select(it.id) }
         }
+    }
+
+    // ---------------------------------------------------------------- realign
+
+    /** Starts realign mode: the first lines (see [Settings.realignLines]) are timed again without changing the lyrics yet. */
+    fun startRealign() {
+        val s = _ui.value
+        val targets = Realign.targets(s.lines, s.settings.realignLines)
+        if (targets.isEmpty()) return run { _messages.tryEmit("Realigning needs lines that already have a time") }
+        _ui.update { it.copy(realign = RealignState(targets), selectedId = targets.first().id, scrollToId = targets.first().id, editingTextId = null, editingTimeId = null) }
+    }
+
+    /** Takes the playhead as the actual time of the current line. After the last line the offset is shown for confirming. */
+    fun realignSet() {
+        val r = _ui.value.realign ?: return
+        val line = r.current ?: return
+        val taken = r.taken + player.currentPosition
+        val next = r.targets.getOrNull(taken.size)
+        _ui.update { it.copy(realign = r.copy(taken = taken, finished = next == null), selectedId = (next ?: line).id, scrollToId = (next ?: line).id) }
+    }
+
+    /** Forgets the last tapped time. */
+    fun realignUndo() {
+        val r = _ui.value.realign ?: return
+        if (r.taken.isEmpty()) return
+        val taken = r.taken.dropLast(1)
+        _ui.update { it.copy(realign = r.copy(taken = taken, finished = false), selectedId = r.targets[taken.size].id, scrollToId = r.targets[taken.size].id) }
+    }
+
+    fun cancelRealign() = _ui.update { it.copy(realign = null) }
+
+    /** Adds the offset to every timed line (one undo step) and leaves realign mode. */
+    fun applyRealign() {
+        val r = _ui.value.realign ?: return
+        if (r.taken.isEmpty()) return cancelRealign()
+        val offset = r.offset
+        _ui.update { it.copy(realign = null) }
+        mutateLines { Realign.shift(it, offset) }
+        _messages.tryEmit("Moved all lines by ${Realign.formatOffset(offset)}. Undo brings the old times back.")
     }
 
     fun clearTimeForSelected() {
@@ -591,29 +640,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openLyricsDialog() = _ui.update { it.copy(showLyricsDialog = true) }
     fun closeLyricsDialog() = _ui.update { it.copy(showLyricsDialog = false) }
-    /** Where Back goes: the screens we came from, most recent last. */
-    private val tabStack = ArrayDeque<Tab>()
+    private val tabHistory = TabHistory<Tab>()
 
-    /** Tab bar tap. Starts a fresh trail, except that leaving the editor lets Back return to it. */
-    fun showTab(tab: Tab) {
-        val from = _ui.value.tab
-        tabStack.clear()
-        if (from == Tab.EDITOR && tab != Tab.EDITOR) tabStack.addLast(Tab.EDITOR)
-        _ui.update { it.copy(tab = tab, canGoBack = tabStack.isNotEmpty()) }
-    }
-
-    /** Moves to [tab] from inside the app (e.g. opening a song) so that Back returns to where you were. */
+    /** Moves to [tab], by the tab bar or from inside the app (e.g. opening a song). Back then returns to the tab left here. */
     fun navigate(tab: Tab) {
-        val from = _ui.value.tab
-        if (tab == from) return
-        if (tabStack.lastOrNull() == tab) tabStack.removeLast() else tabStack.addLast(from)
-        while (tabStack.size > 8) tabStack.removeFirst()
-        _ui.update { it.copy(tab = tab, canGoBack = tabStack.isNotEmpty()) }
+        tabHistory.moved(_ui.value.tab, tab)
+        _ui.update { it.copy(tab = tab, canGoBack = tabHistory.canGoBack) }
     }
+
+    fun showTab(tab: Tab) = navigate(tab)
 
     fun back() {
-        val to = tabStack.removeLastOrNull() ?: return
-        _ui.update { it.copy(tab = to, canGoBack = tabStack.isNotEmpty()) }
+        val to = tabHistory.back() ?: return
+        _ui.update { it.copy(tab = to, canGoBack = tabHistory.canGoBack) }
     }
 
     fun updateSettings(s: Settings) {
@@ -805,8 +844,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             r.onSuccess { tags ->
                 markClean()
                 val lyrics = if (Lrc.hasLyrics(lines)) LyricsState.SYNCED else LyricsState.NONE
+                val counts = Issues.countSong(tags, text)
                 library.updateEntry(uriString) {
-                    it.copy(tags = tags, lyrics = lyrics, issues = Issues.checkSong(tags, text).toList(), untimed = Lrc.countUntimed(lines))
+                    it.copy(tags = tags, lyrics = lyrics, issues = counts.keys.toList(), counts = counts)
                 }
                 _ui.update { it.copy(tags = tags) }
                 _messages.tryEmit("Saved lyrics into ${_ui.value.fileName}$note")
@@ -933,7 +973,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             if (isOpen) { _messages.tryEmit("Can't write to the original file — choose where to save instead"); _saveAs.tryEmit(ExportKind.MP3) }
             return false
         }
-        library.updateEntry(uriString) { it.copy(tags = tags, issues = Issues.checkSong(tags, meta.lyricsText, meta.syltOnly).toList()) }
+        val counts = Issues.countSong(tags, meta.lyricsText, meta.syltOnly)
+        library.updateEntry(uriString) { it.copy(tags = tags, issues = counts.keys.toList(), counts = counts) }
         if (isOpen) _ui.update { it.copy(tags = tags) }
         return true
     }

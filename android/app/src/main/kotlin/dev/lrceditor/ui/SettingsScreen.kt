@@ -24,6 +24,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
 import dev.lrceditor.core.Ignore
+import dev.lrceditor.core.Realign
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -165,6 +166,12 @@ private fun ColumnScope.EditorSettings(s: Settings, onChange: (Settings) -> Unit
     Slider(s.nudgeMs / 1000f, { onChange(s.copy(nudgeMs = (it * 20).toLong().coerceAtLeast(1) * 50)) }, valueRange = 0.05f..1f)
 
     SwitchRow("Auto-advance after setting a time", s.autoAdvance) { onChange(s.copy(autoAdvance = it)) }
+
+    Text("Realign mode: time the first ${s.realignLines} lines")
+    Slider(s.realignLines.toFloat(), { onChange(s.copy(realignLines = it.toInt().coerceIn(1, Realign.MAX_LINES))) },
+        valueRange = 1f..Realign.MAX_LINES.toFloat(), steps = Realign.MAX_LINES - 2)
+    Text("Editor menu > Realign timings: you time this many lines again, and the difference to their old times is added to every line of the song.",
+        color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
 
     HorizontalDivider(color = Studio.Border)
     SectionTitle("Swipe gestures")

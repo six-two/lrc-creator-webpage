@@ -10,10 +10,10 @@ android {
 
     defaultConfig {
         applicationId = "dev.lrceditor"
-        minSdk = 34
+        minSdk = 36
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.0.4"
+        versionCode = 5
+        versionName = "0.0.5"
     }
 
     // Optional local dev key so installs from different machines can update each other. Set in

@@ -33,6 +33,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.lrceditor.EditorViewModel
+import dev.lrceditor.RealignState
 import dev.lrceditor.Tab
 import dev.lrceditor.UiState
 import dev.lrceditor.core.Issue
@@ -40,6 +41,7 @@ import dev.lrceditor.core.Issues
 import dev.lrceditor.core.Line
 import dev.lrceditor.core.LineProblem
 import dev.lrceditor.core.Lrc
+import dev.lrceditor.core.Realign
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.lrceditor.data.Settings
 import dev.lrceditor.data.SwipeAction
@@ -68,6 +70,9 @@ fun EditorScreen(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Unit, onSa
         HorizontalDivider(color = Studio.Border)
         EditorWarnings(vm, ui)
         val listState = rememberLazyListState()
+        val problems = remember(ui.lines) { Issues.lineProblems(ui.lines) }
+        val outOfOrderIds = remember(problems) { problems.filter { it.second == LineProblem.OUT_OF_ORDER }.map { it.first }.toSet() }
+        val sameTimeIds = remember(problems) { problems.filter { it.second == LineProblem.SAME_TIME }.map { it.first }.toSet() }
 
         // Keep the line being played in view while playing (selection never moves playback, and vice versa).
         LaunchedEffect(ui.playingId) {
@@ -98,15 +103,14 @@ fun EditorScreen(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Unit, onSa
                     }
                 }
             }
-            itemsIndexed(ui.lines, key = { _, l -> l.id }) { i, line ->
-                val prevTime = ui.lines.getOrNull(i - 1)?.timeMs
-                val outOfOrder = line.timeMs != null && prevTime != null && line.timeMs < prevTime
-                LineRow(vm, ui, line, outOfOrder)
+            itemsIndexed(ui.lines, key = { _, l -> l.id }) { _, line ->
+                LineRow(vm, ui, line, line.id in outOfOrderIds, line.id in sameTimeIds)
                 HorizontalDivider(color = Studio.Border.copy(alpha = 0.5f))
             }
         }
         PlayerBar(vm, ui)
     }
+    ui.realign?.takeIf { it.finished }?.let { RealignDialog(vm, it) }
 }
 
 @Composable
@@ -128,6 +132,9 @@ private fun EditorHeader(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Un
                 DropdownMenuItem(text = { Text("Discard all changes…") }, leadingIcon = { Icon(Icons.Filled.RestartAlt, null) }, enabled = ui.dirty,
                     onClick = { menu = false; vm.requestDiscard() })
                 HorizontalDivider()
+                DropdownMenuItem(text = { Text("Realign timings…") }, leadingIcon = { Icon(Icons.Filled.MoreTime, null) },
+                    enabled = ui.realign == null && ui.lines.any { it.timeMs != null && it.text.isNotBlank() },
+                    onClick = { menu = false; vm.startRealign() })
                 DropdownMenuItem(text = { Text("Fetch lyrics…") }, leadingIcon = { Icon(Icons.Filled.CloudDownload, null) },
                     onClick = { menu = false; vm.fetchLyrics() })
                 DropdownMenuItem(text = { Text("Import / edit lyrics text…") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Notes, null) },
@@ -157,14 +164,14 @@ private fun EditorHeader(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Un
 private fun EditorWarnings(vm: EditorViewModel, ui: UiState) {
     val problems = remember(ui.lines) { Issues.lineProblems(ui.lines) }
     fun count(k: LineProblem) = problems.count { it.second == k }
-    val untimed = count(LineProblem.UNTIMED)
     val conflict = Issue.CONFLICTING_LEARN_TAGS in Issues.checkSong(ui.tags, null)
+    fun times(n: Int) = if (n > 1) " ×$n" else ""
     // label, what to jump to (null = not tied to a line)
     val parts = listOfNotNull(
-        ("$untimed untimed line${if (untimed == 1) "" else "s"}" to LineProblem.UNTIMED).takeIf { untimed > 0 },
-        ("times out of order" to LineProblem.OUT_OF_ORDER).takeIf { count(LineProblem.OUT_OF_ORDER) > 0 },
-        ("same time twice in a row" to LineProblem.SAME_TIME).takeIf { count(LineProblem.SAME_TIME) > 0 },
-        ("odd timestamps in text" to LineProblem.ODD_TIMESTAMPS).takeIf { count(LineProblem.ODD_TIMESTAMPS) > 0 },
+        ("${count(LineProblem.UNTIMED)} untimed line${if (count(LineProblem.UNTIMED) == 1) "" else "s"}" to LineProblem.UNTIMED).takeIf { count(LineProblem.UNTIMED) > 0 },
+        ("times out of order${times(count(LineProblem.OUT_OF_ORDER))}" to LineProblem.OUT_OF_ORDER).takeIf { count(LineProblem.OUT_OF_ORDER) > 0 },
+        ("same time twice in a row${times(count(LineProblem.SAME_TIME))}" to LineProblem.SAME_TIME).takeIf { count(LineProblem.SAME_TIME) > 0 },
+        ("odd timestamps in text${times(count(LineProblem.ODD_TIMESTAMPS))}" to LineProblem.ODD_TIMESTAMPS).takeIf { count(LineProblem.ODD_TIMESTAMPS) > 0 },
     )
     val canCompare = remember(ui.lines) { vm.doubleLyrics(ui.lines) != null }
     if (parts.isEmpty() && !conflict && !canCompare) return
@@ -185,7 +192,7 @@ private fun EditorWarnings(vm: EditorViewModel, ui: UiState) {
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-private fun LineRow(vm: EditorViewModel, ui: UiState, line: Line, outOfOrder: Boolean) {
+private fun LineRow(vm: EditorViewModel, ui: UiState, line: Line, outOfOrder: Boolean, sameTime: Boolean) {
     val selected = ui.selectedId == line.id
     val playing = ui.playingId == line.id
     val editing = ui.editingTextId == line.id
@@ -261,6 +268,11 @@ private fun LineRow(vm: EditorViewModel, ui: UiState, line: Line, outOfOrder: Bo
                     ),
                 )
                 if (outOfOrder) Icon(Icons.Filled.Warning, "Out of order", tint = Studio.Warn, modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp).size(16.dp))
+                // Same time as the line before it: the warning sits at the end of the line, with a short label for what it is.
+                if (sameTime) Row(Modifier.padding(horizontal = 6.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Warning, "Same time as the line before", tint = Studio.Warn, modifier = Modifier.size(16.dp))
+                    Text("same", Modifier.padding(start = 2.dp), color = Studio.Warn, style = MaterialTheme.typography.labelSmall)
+                }
             }
         }
     }
@@ -351,7 +363,9 @@ private fun PlayerBar(vm: EditorViewModel, ui: UiState) {
             }
             // Touch replacements for the web app's Enter / N keyboard shortcuts (spec §7).
             // Short labels / icons only: these must fit on very narrow and short screens.
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val realign = ui.realign
+            if (realign != null) RealignControls(vm, realign, compact)
+            else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = vm::setTimeForSelected, modifier = Modifier.weight(2f).height(if (compact) 44.dp else 52.dp)) {
                     Icon(Icons.Filled.AccessTime, null); Spacer(Modifier.width(6.dp)); Text("Set", maxLines = 1, softWrap = false)
                 }
@@ -363,4 +377,51 @@ private fun PlayerBar(vm: EditorViewModel, ui: UiState) {
             }
         }
     }
+}
+
+/** Replaces the Set / pause buttons in realign mode: tap Set when the highlighted line is actually sung. */
+@Composable
+private fun RealignControls(vm: EditorViewModel, r: RealignState, compact: Boolean) {
+    val line = r.current
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            if (line != null) "Realign ${r.taken.size + 1} of ${r.targets.size}: tap Set when this is sung" else "Realign: all ${r.targets.size} lines timed",
+            color = Studio.Amber, style = MaterialTheme.typography.labelMedium,
+        )
+        if (line != null) Text(line.text.lines().first(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = vm::cancelRealign) { Text("Cancel") }
+            TextButton(onClick = vm::realignUndo, enabled = r.taken.isNotEmpty()) { Text("Back") }
+            Button(onClick = vm::realignSet, enabled = line != null, modifier = Modifier.weight(1f).height(if (compact) 44.dp else 52.dp)) {
+                Icon(Icons.Filled.AccessTime, null); Spacer(Modifier.width(6.dp)); Text("Set", maxLines = 1, softWrap = false)
+            }
+        }
+    }
+}
+
+/** Asks to confirm moving every line by the measured offset, once all the lines are timed. */
+@Composable
+fun RealignDialog(vm: EditorViewModel, r: RealignState) {
+    val pairs = r.pairs
+    val offset = r.offset
+    val spread = Realign.spread(pairs, offset)
+    AlertDialog(
+        onDismissRequest = vm::realignUndo,
+        title = { Text("Move all lines by ${Realign.formatOffset(offset)}?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                pairs.forEachIndexed { i, (old, actual) ->
+                    Text("${i + 1}.  ${Lrc.formatTime(old)} → ${Lrc.formatTime(actual)}   (${Realign.formatOffset(actual - old)})",
+                        fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                }
+                Text(
+                    if (spread > 500) "The lines disagree by up to ${"%.1f".format(spread / 1000.0)} s, so the song may not be shifted evenly. Go back and time some lines again, or apply anyway."
+                    else "The offset is the middle value of these differences and is added to every timed line. Undo brings the old times back.",
+                    color = if (spread > 500) Studio.Warn else Studio.Dim, style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = vm::applyRealign) { Text("Apply") } },
+        dismissButton = { Row { TextButton(onClick = vm::cancelRealign) { Text("Cancel") }; TextButton(onClick = vm::realignUndo) { Text("Back") } } },
+    )
 }
