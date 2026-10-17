@@ -469,15 +469,38 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         mutateLines { remaining }
     }
 
+    /** What the last Set press changed, so [undoLastTag] can take it back while the lyrics are still as Set left them. */
+    private class LastTag(val after: List<Line>, val selectedBefore: Long?, val jumpToMs: Long?)
+    private var lastTag: LastTag? = null
+
+    /**
+     * Sets the selected line to the playhead. If that line already has a time and the next line has none, the next line
+     * is timed instead, so Set still works when the selection did not move on by itself.
+     */
     fun setTimeForSelected() {
         val s = _ui.value
-        val id = s.selectedId ?: return run { _messages.tryEmit("Select a line first") }
-        val now = player.currentPosition
-        mutateLines { ls -> ls.map { if (it.id == id) it.copy(timeMs = Lrc.clampTime(now)) else it } }
-        if (s.settings.autoAdvance) {
-            val idx = s.lines.indexOfFirst { it.id == id }
-            s.lines.getOrNull(idx + 1)?.let { select(it.id) }
-        }
+        val sel = s.selectedId ?: return run { _messages.tryEmit("Select a line first") }
+        val idx = s.lines.indexOfFirst { it.id == sel }
+        val next = s.lines.getOrNull(idx + 1)
+        val skipToNext = idx != -1 && s.lines[idx].timeMs != null && next != null && next.timeMs == null
+        val target = if (skipToNext) next!! else s.lines[idx]
+        val targetIdx = if (skipToNext) idx + 1 else idx
+        val now = Lrc.clampTime(player.currentPosition)
+        mutateLines { ls -> ls.map { if (it.id == target.id) it.copy(timeMs = now) else it } }
+        // Where to jump when this is undone: the time of the line before, so the line can be heard again from its start.
+        val jumpTo = s.lines.subList(0, targetIdx).lastOrNull { it.timeMs != null }?.timeMs ?: target.timeMs ?: now
+        if (s.settings.autoAdvance) s.lines.getOrNull(targetIdx + 1)?.let { select(it.id) }
+        lastTag = LastTag(_ui.value.lines, sel, jumpTo)
+    }
+
+    /** Takes back the last Set (one undo step), selects the line again and jumps the playback to the line before it. */
+    fun undoLastTag() {
+        val t = lastTag ?: return run { _messages.tryEmit("Nothing to undo") }
+        lastTag = null
+        if (_ui.value.lines != t.after) return run { _messages.tryEmit("The lyrics changed since, use Undo instead") }
+        undo()
+        t.selectedBefore?.let { id -> _ui.update { it.copy(selectedId = id, scrollToId = id) } }
+        t.jumpToMs?.let(::seekTo)
     }
 
     // ---------------------------------------------------------------- realign
@@ -527,19 +550,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun setTime(id: Long, ms: Long?) = mutateLines { ls -> ls.map { if (it.id == id) it.copy(timeMs = ms?.let(Lrc::clampTime)) else it } }
     fun setText(id: Long, text: String) = mutateLines { ls -> ls.map { if (it.id == id) it.copy(text = text) else it } }
 
-    /** Inserts an empty ("pause") line at the playhead. Position rule depends on the auto-advance setting (spec §6). */
+    /**
+     * Inserts an empty ("pause") line at the playhead. Position rule depends on the auto-advance setting (spec §6).
+     * If the selected line has a time and the next one has none, the pause goes between them and the next line is selected.
+     */
     fun insertPauseLine() {
         val s = _ui.value
         val line = Lrc.newLine(Lrc.clampTime(player.currentPosition), "")
         val sel = s.lines.indexOfFirst { it.id == s.selectedId }
+        val next = s.lines.getOrNull(sel + 1)
         val isLast = sel != -1 && sel == s.lines.lastIndex
         var at = s.lines.size
         var keepSelected = false
+        var selectId: Long? = null
         if (sel != -1) {
-            if (s.settings.autoAdvance && !isLast) { at = sel; keepSelected = true } else at = sel + 1
+            if (s.lines[sel].timeMs != null && next != null && next.timeMs == null) { at = sel + 1; selectId = next.id }
+            else if (s.settings.autoAdvance && !isLast) { at = sel; keepSelected = true } else at = sel + 1
         }
         mutateLines { ls -> ls.toMutableList().apply { add(at, line) } }
-        if (!keepSelected) select(line.id)
+        if (selectId != null) select(selectId) else if (!keepSelected) select(line.id)
     }
 
     fun startEditText(id: Long?) = _ui.update { it.copy(editingTextId = id) }
@@ -1132,10 +1161,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val outcome = withContext(Dispatchers.IO) { LyricsFetcher.fetch(lyricsQuery(), providers) }
             if (outcome.errors.isNotEmpty()) logNetworkState()
             val state = outcome.result?.let { FetchState.Found(it) } ?: FetchState.Failed(
-                if (outcome.errors.size == providers.size) "Couldn't reach any lyrics source. Check your internet connection.\n" + outcome.errors.joinToString("\n")
+                if (outcome.errors.size == providers.size) "Couldn't reach any lyrics source. Check your internet connection (on GrapheneOS also the app's Network permission).\n" + outcome.errors.joinToString("\n")
                 else "No lyrics found for this song." + outcome.errors.joinToString("") { "\n$it" }
             )
             _ui.update { if (it.fetch == FetchState.Loading) it.copy(fetch = state) else it }
+        }
+    }
+
+    init {
+        Http.networkProvider = {
+            val cm = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)
+            // The active network if it has internet; otherwise any network that claims to.
+            cm.activeNetwork?.takeIf { cm.getNetworkCapabilities(it)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true }
+                ?: cm.allNetworks.firstOrNull { cm.getNetworkCapabilities(it)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true }
         }
     }
 

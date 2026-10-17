@@ -27,6 +27,8 @@ data class SearchPrefs(
     val fixWarnings: Boolean = false,
     /** Shared by all search pages. */
     val lyrics: LyricsFilter = LyricsFilter.ALL,
+    /** Learn tab: whether the search and lyrics filter are shown. */
+    val learnFiltersOpen: Boolean = true,
 )
 
 class SearchPrefsStore(private val context: Context) {

@@ -56,7 +56,6 @@ fun LrcApp(vm: EditorViewModel) {
     val tabState = rememberSaveableStateHolder()
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
         containerColor = Studio.Bg,
         bottomBar = {
             // On short screens drop the icons (and the big pill indicator) to give the content more room.
@@ -85,6 +84,8 @@ fun LrcApp(vm: EditorViewModel) {
                 Tab.SETTINGS -> SettingsScreen(vm, ui.settings)
             } }
             if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            // At the top, so it never covers the buttons at the bottom of the editor.
+            SnackbarHost(snackbar, Modifier.align(Alignment.TopCenter))
         }
     }
 

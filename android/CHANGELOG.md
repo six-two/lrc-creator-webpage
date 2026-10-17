@@ -2,6 +2,15 @@
 
 High-level, human-readable list of what changed in the Android app. Newest version first.
 
+## 0.0.7
+
+- Learn tab: the search and lyrics filter can be collapsed with the arrow next to "Search & filter" to give the list more room; the last state is remembered. When collapsed, the label turns amber if a search or filter is still active.
+- Learn tab: the lyrics filter (All, Any lyrics, Unsynced, Synced, No lyrics) from the library search is now there too, with the number of songs of the open list (Learn, Unsingable, SingAlong) that have each status.
+- Editor: double-tap or long-press the Set button to undo the last Set. The line is selected again and the playback jumps to the time of the line before it, so you can hear it again and re-tap.
+- Editor: when the selected line already has a time and the next line has none, Set times the next line instead of re-timing the selected one and moves on. Adding a pause in that situation puts the pause between the two lines and selects the next line.
+- Messages (saved, errors, ...) now show at the top of the screen instead of covering the Set and pause buttons.
+- Internet on GrapheneOS and similar systems: lyrics requests are now sent through the phone's active network explicitly, and the failure message mentions the app's Network permission (GrapheneOS: App info > Permissions > Network). Not yet confirmed on a GrapheneOS phone.
+
 ## 0.0.6
 
 - New warning "short break between lyrics": an empty line followed by a lyric line less than a set time later. The limit is set in Settings > Editor > Warnings (default 0.3 s). The empty line shows "short" at its end, and the warning is above the editor and in the Fix list under Warnings.

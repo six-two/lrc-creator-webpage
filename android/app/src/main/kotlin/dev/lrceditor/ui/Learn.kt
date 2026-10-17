@@ -5,6 +5,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -15,6 +17,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.lrceditor.EditorViewModel
 import dev.lrceditor.core.LearnState
 import dev.lrceditor.core.LyricsFilter
+import dev.lrceditor.core.LyricsState
 import dev.lrceditor.core.NameField
 import dev.lrceditor.core.Search
 
@@ -40,7 +43,15 @@ fun LearnScreen(vm: EditorViewModel) {
         }
     }
     val all = groups[view].orEmpty()
-    val shown = remember(all, query) { if (query.isBlank()) all else Search.byName(all, query, NameField.TITLE, fuzzy = true) }
+    var lyricsName by rememberSaveable { mutableStateOf(LyricsFilter.ALL.name) }
+    val lyrics = LyricsFilter.valueOf(lyricsName)
+    val prefs by vm.search.collectAsStateWithLifecycle()
+    val open = prefs.learnFiltersOpen
+    // How many songs of the current list have each lyrics status.
+    val counts = remember(all) { LyricsFilter.entries.associateWith { f -> all.count { f.matches(it.lyrics) } } }
+    val unknownLyrics = remember(all) { all.count { it.lyrics == LyricsState.UNKNOWN } }
+    val byLyrics = remember(all, lyrics) { if (lyrics == LyricsFilter.ALL) all else all.filter { lyrics.matches(it.lyrics) } }
+    val shown = remember(byLyrics, query) { if (query.isBlank()) byLyrics else Search.byName(byLyrics, query, NameField.TITLE, fuzzy = true) }
     val compact = isCompactScreen()
 
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
@@ -57,17 +68,31 @@ fun LearnScreen(vm: EditorViewModel) {
                 }
             }
         }
-        OutlinedTextField(
-            query, ::setQuery, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Search ${view.label}") },
-            trailingIcon = { if (query.isNotEmpty()) IconButton({ setQuery("") }) { Icon(Icons.Filled.Close, "Clear") } },
-        )
+        val active = query.isNotBlank() || lyrics != LyricsFilter.ALL
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (open) "Search & filter" else if (active) "Search & filter (active)" else "Search & filter",
+                color = if (!open && active) Studio.Amber else Studio.Dim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton({ vm.updateSearch { it.copy(learnFiltersOpen = !open) } }) {
+                Icon(if (open) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, if (open) "Hide search and filter" else "Show search and filter")
+            }
+        }
+        if (open) {
+            OutlinedTextField(
+                query, ::setQuery, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Search ${view.label}") },
+                trailingIcon = { if (query.isNotEmpty()) IconButton({ setQuery("") }) { Icon(Icons.Filled.Close, "Clear") } },
+            )
+            LyricsFilterRow(lyrics, unknownLyrics, counts) { lyricsName = it.name }
+        }
         LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
             if (shown.isEmpty()) item {
-                Text(if (index == null) "No library yet. Choose your music folder in Settings." else if (query.isNotBlank()) "No ${view.label} songs match." else "No songs are marked ${view.label}.",
+                Text(if (index == null) "No library yet. Choose your music folder in Settings." else if (query.isNotBlank() || lyrics != LyricsFilter.ALL) "No ${view.label} songs match." else "No songs are marked ${view.label}.",
                     color = Studio.Dim, modifier = Modifier.padding(vertical = 16.dp))
             }
             items(shown, key = { it.uri }) { s ->
-                SongRow(s, ui.settings, LyricsFilter.ALL, onLearn = { vm.requestLearnState(s.uri, s.displayTitle, it) }) { vm.openSong(s.uri) }
+                SongRow(s, ui.settings, lyrics, onLearn = { vm.requestLearnState(s.uri, s.displayTitle, it) }) { vm.openSong(s.uri) }
             }
         }
     }

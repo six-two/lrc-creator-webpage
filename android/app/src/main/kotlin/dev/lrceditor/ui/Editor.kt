@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
@@ -343,6 +344,7 @@ private fun TextEditor(initial: String, modifier: Modifier, onCommit: (String) -
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PlayerBar(vm: EditorViewModel, ui: UiState) {
     val pos by vm.positionMs.collectAsState()
@@ -397,8 +399,17 @@ private fun PlayerBar(vm: EditorViewModel, ui: UiState) {
             val realign = ui.realign
             if (realign != null) RealignControls(vm, realign, compact)
             else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = vm::setTimeForSelected, modifier = Modifier.weight(2f).height(if (compact) 44.dp else 52.dp)) {
-                    Icon(Icons.Filled.AccessTime, null); Spacer(Modifier.width(6.dp)); Text("Set", maxLines = 1, softWrap = false)
+                // Tap sets the time; double tap or long press takes the last Set back and jumps the playback to the line before it.
+                Surface(
+                    shape = ButtonDefaults.shape, color = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.weight(2f).height(if (compact) 44.dp else 52.dp).combinedClickable(
+                        role = Role.Button,
+                        onClick = vm::setTimeForSelected, onDoubleClick = vm::undoLastTag, onLongClick = vm::undoLastTag,
+                    ),
+                ) {
+                    Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                        Icon(Icons.Filled.AccessTime, null); Spacer(Modifier.width(6.dp)); Text("Set", maxLines = 1, softWrap = false)
+                    }
                 }
                 OutlinedButton(onClick = vm::insertPauseLine, modifier = Modifier.weight(1f).height(if (compact) 44.dp else 52.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp)) {

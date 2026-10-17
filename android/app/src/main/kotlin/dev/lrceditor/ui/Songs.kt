@@ -213,11 +213,11 @@ private fun LazyListScope.resultItems(results: List<SongEntry>, searched: Boolea
 /** Lyrics filter shared by every search page. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun LyricsFilterRow(current: LyricsFilter, unknown: Int, onChange: (LyricsFilter) -> Unit) {
+internal fun LyricsFilterRow(current: LyricsFilter, unknown: Int, counts: Map<LyricsFilter, Int>? = null, onChange: (LyricsFilter) -> Unit) {
     Column(Modifier.padding(top = 4.dp)) {
         Text("Lyrics", color = Studio.Dim, style = MaterialTheme.typography.labelMedium)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            LyricsFilter.entries.forEach { f -> FilterChip(current == f, { onChange(f) }, { Text(f.label) }) }
+            LyricsFilter.entries.forEach { f -> FilterChip(current == f, { onChange(f) }, { Text(counts?.get(f)?.let { n -> "${f.label} $n" } ?: f.label) }) }
         }
         if (current != LyricsFilter.ALL && unknown > 0) {
             Text("$unknown songs have no lyrics info yet — run a rescan in Settings.", color = Studio.Warn,

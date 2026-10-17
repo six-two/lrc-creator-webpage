@@ -1,5 +1,6 @@
 package dev.lrceditor.data.lyrics
 
+import android.net.Network
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -12,10 +13,18 @@ object Http {
     const val BROWSER_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
     private const val MAX_BYTES = 2 * 1024 * 1024
 
+    /**
+     * Gives the network to use. Requests are sent through it explicitly instead of the process default, which on some
+     * systems (GrapheneOS with its own DNS and per-app network handling, VPNs) is not bound to the working network.
+     */
+    @Volatile var networkProvider: (() -> Network?)? = null
+
     fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
     fun get(url: String, timeoutMs: Int, headers: Map<String, String> = emptyMap()): Response {
-        val c = URL(url).openConnection() as HttpURLConnection
+        val u = URL(url)
+        val net = runCatching { networkProvider?.invoke() }.getOrNull()
+        val c = (net?.openConnection(u) ?: u.openConnection()) as HttpURLConnection
         try {
             c.connectTimeout = timeoutMs
             c.readTimeout = timeoutMs
