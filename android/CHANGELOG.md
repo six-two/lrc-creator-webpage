@@ -2,6 +2,22 @@
 
 High-level, human-readable list of what changed in the Android app. Newest version first.
 
+## 0.0.8
+
+- Fix list: the warning "empty lines in a row" now has a "Fix all" button that removes the extra empty lines from the lyrics of all those songs at once (asks first, like the other fixes). Songs with a synced frame and the song open in the editor are skipped.
+- Library: the ⋮ menu of a song has "Mark lyrics as broken" (and "Remove broken lyrics mark") for any song, not only the open one.
+- New Meta tab: edit the tags of a song as free text. Artist, title, album and grouping are always shown; other fields (album artist, composer, lyricist, genre, year, track, disc, subtitle, work, publisher, copyright, language, BPM, comment) show when the song has them or after "Add field". The grouping is a list of bubbles like in the tag search (tap one to remove it; type a new tag and press Done, ";" or ","), and it, the artists and the album suggest values from your library as you type. The album suggestions start with the albums of the same artist, in amber. It always shows the song that is open in the editor.
+- Fixed: new grouping tags (for example when a song is added to the Learn list, or gets lyrics) were written to the "Work" field (TIT1) of files that had no grouping. They now go to the grouping field (GRP1, as iTunes does). A file that only has the old Work field keeps being read as grouping, and its Work field is moved to GRP1 the next time its tags change.
+- New warning "Work field (TIT1) set" in the Fix list for songs with a Work field. In the Meta tab a button "→ Grouping" next to the Work field moves its text into the grouping.
+- Fetching lyrics: new sources QQ Music, LrcApi (lrc.cx, which itself looks through several sources) and lyrics.ovh (plain text). If the exact title and artist find no synced lyrics, the search is repeated with a cleaned-up title and the first artist only ("feat.", brackets and "- Remastered" removed; for files without an artist tag the name "Artist - Title" is split up). When no source has synced lyrics, the best-matching plain text is shown first instead of the first one.
+- Fetching lyrics now opens a full screen instead of a popup. All enabled sources are asked at once and listed with their state (searching, number of matches, or the error). Tap a source to preview its best match; when a more popular song is in the way, pick another match from the dropdown under the sources or press "Next match" to skip to the next candidate (of this source, then of the next). Each source now offers up to 5 candidates instead of 2. The dropdown also opens for a single match and wraps long titles. A green dot marks synced and a yellow dot plain lyrics. The lyrics preview gets all the room that is left: the repeated info lines are gone, and on small screens the heading and source rows are smaller. "Use these lyrics" puts the previewed lyrics in the editor and always has room at the bottom; looking the song up in the browser and pasting from the clipboard are icon buttons next to it.
+- The Fetch lyrics button (and the menu entry) is disabled and says "Offline" when the phone has no network.
+- Settings > Appearance: "Pure black (OLED) theme" makes the backgrounds black instead of dark blue-grey.
+- On narrow screens the tab names are cut off with an ellipsis ("Settin…") instead of wrapping onto a second line.
+- Editor: long-pressing the add-pause button takes the pause back, like long-pressing Set does for a time (as long as it was the last action).
+- Editor: undoing a Set (long-press or double-tap) jumps to the start of the song when no earlier line has a time, and never more than 3 seconds back from where the song is playing. The 3 seconds can be changed in Settings > Editor > Timing.
+- The library data version went up (to 7) because the index now stores the Work field warning, so the app rescans all songs in the background once.
+
 ## 0.0.7
 
 - Learn tab: the search and lyrics filter can be collapsed with the arrow next to "Search & filter" to give the list more room; the last state is remembered. When collapsed, the label turns amber if a search or filter is still active.

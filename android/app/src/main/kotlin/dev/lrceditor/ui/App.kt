@@ -15,6 +15,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.lrceditor.EditorViewModel
 import dev.lrceditor.ExportKind
@@ -62,15 +63,17 @@ fun LrcApp(vm: EditorViewModel) {
             val compact = isCompactScreen()
             if (compact) CompactTabBar(ui.tab, ui.dirty, vm::showTab) else NavigationBar(containerColor = Studio.Panel) {
                 NavigationBarItem(ui.tab == Tab.LIBRARY, { vm.showTab(Tab.LIBRARY) },
-                    icon = { Icon(Icons.Filled.LibraryMusic, null) }, label = { Text("Library") })
+                    icon = { Icon(Icons.Filled.LibraryMusic, null) }, label = { Text("Library", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) })
                 NavigationBarItem(ui.tab == Tab.LEARN, { vm.showTab(Tab.LEARN) },
-                    icon = { Icon(Icons.Filled.School, null) }, label = { Text("Learn") })
+                    icon = { Icon(Icons.Filled.School, null) }, label = { Text("Learn", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) })
                 NavigationBarItem(ui.tab == Tab.EDITOR, { vm.showTab(Tab.EDITOR) },
                     icon = {
                         BadgedBox(badge = { if (ui.dirty) Badge(containerColor = Studio.Amber) }) { Icon(Icons.Filled.Timer, null) }
-                    }, label = { Text("Editor") })
+                    }, label = { Text("Editor", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) })
+                NavigationBarItem(ui.tab == Tab.META, { vm.showTab(Tab.META) },
+                    icon = { Icon(Icons.Filled.Edit, null) }, label = { Text("Meta", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) })
                 NavigationBarItem(ui.tab == Tab.SETTINGS, { vm.showTab(Tab.SETTINGS) },
-                    icon = { Icon(Icons.Filled.Settings, null) }, label = { Text("Settings") })
+                    icon = { Icon(Icons.Filled.Settings, null) }, label = { Text("Settings", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) })
             }
         },
     ) { padding ->
@@ -81,6 +84,7 @@ fun LrcApp(vm: EditorViewModel) {
                 Tab.EDITOR -> EditorScreen(vm, ui,
                     onSaveLrcAs = { createLrc.launch(vm.suggestedName(ExportKind.LRC)) },
                     onSaveMp3As = { createMp3.launch(vm.suggestedName(ExportKind.MP3)) })
+                Tab.META -> MetaScreen(vm)
                 Tab.SETTINGS -> SettingsScreen(vm, ui.settings)
             } }
             if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -89,6 +93,10 @@ fun LrcApp(vm: EditorViewModel) {
         }
     }
 
+    // The lyrics search covers the whole screen, tab bar included.
+    ui.fetch?.let { f ->
+        FetchScreen(f, vm, snackbar)
+    }
     if (ui.showLyricsDialog) LyricsTextDialog(ui.rawLyrics ?: vm.currentLrc(), ui.lyricsError, { vm.replaceAllLyrics(it) }, vm::closeLyricsDialog)
     val compare by vm.compare.collectAsStateWithLifecycle()
     compare?.let { CompareDialog(vm, it, ui.isPlaying) }
@@ -112,16 +120,16 @@ fun LrcApp(vm: EditorViewModel) {
     )
     ui.pendingTag?.let { a ->
         ConfirmDialog(
-            title = if (a is TagAction.FixLeadingEmpty) "Change the lyrics in the files?" else "Change tags in the file?",
+            title = if (a is TagAction.FixLeadingEmpty || a is TagAction.FixConsecutiveEmpty) "Change the lyrics in the files?" else "Change tags in the file?",
             text = when (a) {
                 is TagAction.SetLearn -> "The tags of \"${a.name}\" are rewritten in place (${a.state.label.let { if (a.state == LearnState.NONE) "learning tag removed" else "marked $it" }}). Other tags and the lyrics are kept."
                 is TagAction.FixLeadingEmpty -> "The empty first line is removed from the lyrics of ${a.uris.size} songs, in place. Nothing else in the lyrics or tags changes."
+                is TagAction.FixConsecutiveEmpty -> "Empty lines that directly follow another empty line are removed from the lyrics of ${a.uris.size} songs, in place. Nothing else in the lyrics or tags changes."
                 is TagAction.FixAll -> "The Lyrics and Karaoke tags of ${a.count} songs are rewritten in place to match their lyrics. Other tags and the lyrics are kept."
             },
             confirm = "Change", onConfirm = vm::confirmTagAction, onDismiss = vm::dismissTagAction,
         )
     }
-    ui.fetch?.let { FetchDialog(it, vm) }
     if (ui.pendingOpen != null) ConfirmDialog(
         title = "Open another song?",
         text = "You have unexported changes to \"${ui.fileName}\". Opening the new file will discard them.",
@@ -134,7 +142,7 @@ fun LrcApp(vm: EditorViewModel) {
 private fun CompactTabBar(selected: Tab, dirty: Boolean, onSelect: (Tab) -> Unit) {
     Surface(color = Studio.Panel) {
         Row(Modifier.fillMaxWidth().navigationBarsPadding().height(44.dp)) {
-            listOf(Tab.LIBRARY to "Library", Tab.LEARN to "Learn", Tab.EDITOR to "Editor", Tab.SETTINGS to "Settings").forEach { (tab, label) ->
+            listOf(Tab.LIBRARY to "Library", Tab.LEARN to "Learn", Tab.EDITOR to "Editor", Tab.META to "Meta", Tab.SETTINGS to "Settings").forEach { (tab, label) ->
                 val on = tab == selected
                 Box(
                     Modifier.weight(1f).fillMaxHeight().clickable { onSelect(tab) },
@@ -143,6 +151,7 @@ private fun CompactTabBar(selected: Tab, dirty: Boolean, onSelect: (Tab) -> Unit
                     if (on) Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(2.dp).background(Studio.Amber))
                     Text(
                         if (tab == Tab.EDITOR && dirty) "$label •" else label,
+                        maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
                         color = if (on) Studio.Amber else Studio.Dim,
                         style = MaterialTheme.typography.labelLarge,
                     )

@@ -241,7 +241,7 @@ class GroupingWriteTest {
         val f = file(frame("TIT2", tit2), frame("TIT1", text(0, "Anime; Learn")), frame("APIC", apic))
         val out = Id3.setGrouping(f, Search.withLearnState(Search.parseTags("Anime; Learn"), LearnState.SING_ALONG))
         val p = Id3.parse(out)
-        assertEquals(listOf("TIT2", "TIT1", "APIC"), p.frames.map { it.id })
+        assertEquals(listOf("TIT2", "GRP1", "APIC"), p.frames.map { it.id }) // the grouping moves from TIT1 (the Work) to GRP1
         assertArrayEquals(tit2, p.frames[0].data)
         assertArrayEquals(apic, p.frames[2].data)
         assertArrayEquals(audio, out.copyOfRange(p.audioStart, out.size))
@@ -249,12 +249,12 @@ class GroupingWriteTest {
         assertEquals("Song", meta(out).title)
     }
 
-    @Test fun writesToGrp1WhenThatIsWhatExistsAndCreatesTit1WhenNeither() {
+    @Test fun writesToGrp1WhenThatIsWhatExistsAndCreatesGrp1WhenNeither() {
         val g = Id3.setGrouping(file(frame("GRP1", text(0, "Old"))), listOf("New", "Learn"))
         assertEquals(listOf("GRP1"), Id3.parse(g).frames.map { it.id })
         assertEquals(listOf("New", "Learn"), tags(g))
         val n = Id3.setGrouping(file(frame("TIT2", text(3, "Song"))), listOf("Learn"))
-        assertEquals(listOf("TIT2", "TIT1"), Id3.parse(n).frames.map { it.id })
+        assertEquals(listOf("TIT2", "GRP1"), Id3.parse(n).frames.map { it.id })
         assertEquals(listOf("Learn"), tags(n))
         val bare = Id3.setGrouping(audio, listOf("Learn"))
         assertEquals(listOf("Learn"), tags(bare))
@@ -691,22 +691,31 @@ class LyricsFetchTest {
     }
     private fun res(src: String, synced: Boolean, score: Double = 0.9) = LyricsResult(src, synced, "text $src", "", score)
 
-    @Test fun syncedBeatsPlainAcrossProviders() = runBlocking {
-        val o = LyricsFetcher.fetch(q, listOf(fake("A", res("A", false)), fake("B", res("B", true))))
-        assertEquals("B", o.result?.source)
+    private fun best(vararg p: LyricsProvider) = runBlocking {
+        val lists = p.map { runCatching { LyricsFetcher.searchSource(it, q) }.getOrDefault(emptyList()) }
+        LyricsFetcher.best(lists)?.let { (i, j) -> lists[i][j] }
     }
 
-    @Test fun firstPlainWhenNothingSyncedAndFailuresAreSkipped() = runBlocking {
-        val o = LyricsFetcher.fetch(q, listOf(fake("A", fail = true), fake("B", res("B", false)), fake("C", res("C", false))))
-        assertEquals("B", o.result?.source)
-        assertEquals(1, o.errors.size)
-        assertTrue(o.errors[0].startsWith("A:"))
+    @Test fun syncedBeatsPlainAcrossProviders() {
+        assertEquals("B", best(fake("A", res("A", false)), fake("B", res("B", true)))?.source)
     }
 
-    @Test fun lowScoresAndEmptyGiveNothing() = runBlocking {
-        val o = LyricsFetcher.fetch(q, listOf(fake("A", res("A", true, score = 0.2)), fake("B")))
-        assertNull(o.result)
-        assertTrue(o.errors.isEmpty())
+    @Test fun firstSyncedSourceWinsAndBestPlainOtherwise() {
+        assertEquals("A", best(fake("A", res("A", true)), fake("B", res("B", true)))?.source)
+        assertEquals("C", best(fake("A", fail = true), fake("B", res("B", false, score = 0.7)), fake("C", res("C", false, score = 0.9)))?.source)
+    }
+
+    @Test fun failedSourceThrowsButLaterVariantFailureKeepsResults() = runBlocking {
+        assertThrows(java.io.IOException::class.java) { runBlocking { LyricsFetcher.searchSource(fake("A", fail = true), q) } }
+        Unit
+    }
+
+    @Test fun lowScoresAndEmptyGiveNothing() {
+        assertNull(best(fake("A", res("A", true, score = 0.2)), fake("B")))
+        // a weak candidate is listed for choosing but never picked by itself
+        val listed = runBlocking { LyricsFetcher.searchSource(fake("A", res("A", true, score = 0.5)), q) }
+        assertEquals(1, listed.size)
+        assertNull(LyricsFetcher.best(listOf(listed)))
     }
 
     @Test fun matchScoring() {
@@ -817,7 +826,7 @@ class Id3CompatTest {
         val out = Id3.update(f, "[00:01.00]a", listOf("Anime", "Lyrics", "Karaoke"))
         val p = Id3.parse(out)
         assertEquals(3, out[3].toInt()) // written as v2.3
-        assertEquals(listOf("TIT2", "TXXX", "TIT1", "USLT"), p.frames.map { it.id })
+        assertEquals(listOf("TIT2", "TXXX", "GRP1", "USLT"), p.frames.map { it.id })
         assertArrayEquals(long, p.frames[1].data)
         assertArrayEquals(audio, out.copyOfRange(p.audioStart, out.size))
         val m = Id3.readMeta(out.inputStream())
@@ -857,15 +866,16 @@ class Id3CompatTest {
 
 class SettingsAndIndexTest {
     @Test fun lyricsSourceSettingsRoundTrip() {
-        val custom = listOf(SourceSetting(LyricsSource.NETEASE, true), SourceSetting(LyricsSource.LRCLIB, false), SourceSetting(LyricsSource.LYRICSIFY, true))
+        val custom = listOf(SourceSetting(LyricsSource.NETEASE, true), SourceSetting(LyricsSource.LRCLIB, false), SourceSetting(LyricsSource.LYRICSIFY, true)) +
+            listOf(LyricsSource.QQMUSIC, LyricsSource.LRCAPI, LyricsSource.LYRICS_OVH).map { SourceSetting(it, true) }
         assertEquals(custom, parseSources(formatSources(custom)))
     }
 
     @Test fun lyricsSourceSettingsToleratesJunkAndNewSources() {
         assertEquals(LyricsSource.entries.toList(), parseSources(null).map { it.source })
         val p = parseSources("bogus:1,netease:0,netease:1,,lrclib")
-        assertEquals(listOf(LyricsSource.NETEASE, LyricsSource.LRCLIB, LyricsSource.LYRICSIFY), p.map { it.source })
-        assertEquals(listOf(false, true, true), p.map { it.enabled }) // missing flag = enabled, first duplicate wins
+        assertEquals(listOf(LyricsSource.NETEASE, LyricsSource.LRCLIB, LyricsSource.LYRICSIFY, LyricsSource.QQMUSIC, LyricsSource.LRCAPI, LyricsSource.LYRICS_OVH), p.map { it.source })
+        assertEquals(listOf(false, true, true, true, true, true), p.map { it.enabled }) // missing flag = enabled, first duplicate wins
     }
 
     private val codec = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }

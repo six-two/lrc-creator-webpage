@@ -53,6 +53,7 @@ private enum class SettingsPage(val title: String, val summary: String, val icon
     SEARCH("Search", "What each song shows in the Library", Icons.Filled.Search),
     EDITOR("Editor", "Player, timing, tick sound and swipe gestures", Icons.Filled.Timer),
     LYRICS("Lyrics sources", "Where to fetch lyrics from, and in which order", Icons.Filled.CloudDownload),
+    APPEARANCE("Appearance", "Theme", Icons.Filled.Palette),
     SAVING("Saving", "Writing lyrics into the MP3", Icons.Filled.Save),
 }
 
@@ -90,6 +91,10 @@ fun SettingsScreen(vm: EditorViewModel, s: Settings) {
                 SettingsPage.SEARCH -> SearchSettings(s, vm::updateSettings)
                 SettingsPage.EDITOR -> EditorSettings(s, vm::updateSettings, speed, vm::setSpeed)
                 SettingsPage.LYRICS -> LyricsSettings(vm, s, vm::updateSettings)
+                SettingsPage.APPEARANCE -> {
+                    SwitchRow("Pure black (OLED) theme", s.oledBlack) { vm.updateSettings(s.copy(oledBlack = it)) }
+                    Text("Black instead of dark blue-grey backgrounds. Saves power on OLED screens.", color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+                }
                 SettingsPage.SAVING -> SavingSettings(s, vm::updateSettings)
             }
         }
@@ -181,6 +186,12 @@ private fun ColumnScope.EditorSettings(s: Settings, onChange: (Settings) -> Unit
 
     SwitchRow("Auto-advance after setting a time", s.autoAdvance) { onChange(s.copy(autoAdvance = it)) }
 
+    Text("Undo a Set: jump back at most ${s.undoJumpBackSec} s")
+    Slider(s.undoJumpBackSec.toFloat(), { onChange(s.copy(undoJumpBackSec = it.toInt().coerceIn(1, Realign.MAX_UNDO_JUMP_SEC))) },
+        valueRange = 1f..Realign.MAX_UNDO_JUMP_SEC.toFloat(), steps = Realign.MAX_UNDO_JUMP_SEC - 2)
+    Text("Long-press or double-tap Set to take the last Set back. The playback goes to the line before it, but never more than this far back from where it is now. If no earlier line has a time, it goes to the start of the song.",
+        color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+
     Text("Realign mode: time the first ${s.realignLines} lines")
     Slider(s.realignLines.toFloat(), { onChange(s.copy(realignLines = it.toInt().coerceIn(1, Realign.MAX_LINES))) },
         valueRange = 1f..Realign.MAX_LINES.toFloat(), steps = Realign.MAX_LINES - 2)
@@ -207,7 +218,7 @@ private fun ColumnScope.EditorSettings(s: Settings, onChange: (Settings) -> Unit
 
 @Composable
 private fun ColumnScope.LyricsSettings(vm: EditorViewModel, s: Settings, onChange: (Settings) -> Unit) {
-    Text("\"Fetch lyrics\" in the editor tries the enabled sources from top to bottom. The first synced result wins; if no source has synced lyrics, the first plain-text result is offered. You always get a preview before anything changes.",
+    Text("\"Fetch lyrics\" in the editor tries the enabled sources from top to bottom. The first synced result wins; if no source has synced lyrics, the best plain-text result is offered. If nothing is found with the exact tags, the title and artist are cleaned up (\"feat.\", brackets, \"- Remastered\", only the first artist) and the sources are tried again. You always get a preview before anything changes.",
         color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
     fun move(i: Int, d: Int) {
         val list = s.lyricsSources.toMutableList()

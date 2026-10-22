@@ -30,6 +30,8 @@ import dev.lrceditor.core.Line
 import dev.lrceditor.core.Lrc
 import dev.lrceditor.core.LyricsFilter
 import dev.lrceditor.core.LyricsState
+import dev.lrceditor.core.MetaField
+import dev.lrceditor.core.MetaFields
 import dev.lrceditor.core.NameField
 import dev.lrceditor.core.Realign
 import dev.lrceditor.core.Search
@@ -42,16 +44,28 @@ import kotlinx.coroutines.flow.*
 
 enum class ExportKind { LRC, MP3 }
 
-enum class Tab { LIBRARY, LEARN, EDITOR, SETTINGS }
+enum class Tab { LIBRARY, LEARN, EDITOR, META, SETTINGS }
 
-/** State of the "fetch lyrics" dialog. */
-sealed interface FetchState {
-    data object Loading : FetchState
-    data class Found(val result: LyricsResult, val useRomanization: Boolean = false) : FetchState {
-        val text get() = if (useRomanization) result.withRomanization ?: result.text else result.text
-    }
-    /** Nothing usable; the dialog then offers the browser and clipboard routes. */
-    data class Failed(val message: String) : FetchState
+enum class SourceStatus { SEARCHING, DONE, FAILED }
+
+/** One lyrics source on the lyrics search screen: what it is doing, and the candidates it found (best first). */
+data class SourceRun(
+    val source: LyricsSource, val status: SourceStatus = SourceStatus.SEARCHING,
+    val results: List<LyricsResult> = emptyList(), val error: String? = null,
+)
+
+/**
+ * State of the lyrics search screen. [shown] = (source index, candidate index) of the lyrics being previewed; [picked] = the user
+ * chose it, so the search stops choosing by itself. [pasted] replaces everything after "Paste from clipboard".
+ */
+data class FetchState(
+    val title: String, val runs: List<SourceRun>,
+    val shown: Pair<Int, Int>? = null, val picked: Boolean = false,
+    val pasted: LyricsResult? = null, val useRomanization: Boolean = false,
+) {
+    val current: LyricsResult? get() = pasted ?: shown?.let { runs.getOrNull(it.first)?.results?.getOrNull(it.second) }
+    val text get() = current?.let { if (useRomanization) it.withRomanization ?: it.text else it.text }.orEmpty()
+    val searching get() = runs.any { it.status == SourceStatus.SEARCHING }
 }
 
 /** A tag rewrite that waits for the "overwrite the original file?" confirmation. */
@@ -60,6 +74,8 @@ sealed interface TagAction {
     data class FixAll(val count: Int) : TagAction
     /** Removes the empty first line from the lyrics of [count] songs. */
     data class FixLeadingEmpty(val uris: List<String>) : TagAction
+    /** Collapses runs of empty lines into one in the lyrics of these songs. */
+    data class FixConsecutiveEmpty(val uris: List<String>) : TagAction
 }
 
 /** Technical details of the open MP3, shown by the info dialog. */
@@ -118,6 +134,17 @@ data class UiState(
     val realign: RealignState? = null,
 ) {
     val learn get() = Search.learnStateOf(tags)
+}
+
+/** The metadata editor: [values] are being edited, [original] is what the file had. [added] = optional fields the user added. */
+data class MetaState(
+    val uri: String, val fileName: String,
+    val original: Map<MetaField, String>, val values: Map<MetaField, String>,
+    val added: Set<MetaField> = emptySet(), val saving: Boolean = false,
+) {
+    val changed get() = MetaFields.changed(original, values).isNotEmpty()
+    /** Fields to show: the core ones, those the song has a value for (or had), and those added. */
+    val shown get() = MetaField.entries.filter { it.core || it in added || !original[it].isNullOrEmpty() || !values[it].isNullOrEmpty() }
 }
 
 /** Report of the lyrics connection test; [running] while sources are still being tried. */
@@ -469,8 +496,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         mutateLines { remaining }
     }
 
-    /** What the last Set press changed, so [undoLastTag] can take it back while the lyrics are still as Set left them. */
-    private class LastTag(val after: List<Line>, val selectedBefore: Long?, val jumpToMs: Long?)
+    /** What the last Set or pause press changed, so [undoLastTag] can take it back while the lyrics are still as Set left them. */
+    private class LastTag(val after: List<Line>, val selectedBefore: Long?, val previousMs: Long?)
     private var lastTag: LastTag? = null
 
     /**
@@ -488,19 +515,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val now = Lrc.clampTime(player.currentPosition)
         mutateLines { ls -> ls.map { if (it.id == target.id) it.copy(timeMs = now) else it } }
         // Where to jump when this is undone: the time of the line before, so the line can be heard again from its start.
-        val jumpTo = s.lines.subList(0, targetIdx).lastOrNull { it.timeMs != null }?.timeMs ?: target.timeMs ?: now
+        val previous = s.lines.subList(0, targetIdx).lastOrNull { it.timeMs != null }?.timeMs
         if (s.settings.autoAdvance) s.lines.getOrNull(targetIdx + 1)?.let { select(it.id) }
-        lastTag = LastTag(_ui.value.lines, sel, jumpTo)
+        lastTag = LastTag(_ui.value.lines, sel, previous)
     }
 
-    /** Takes back the last Set (one undo step), selects the line again and jumps the playback to the line before it. */
+    /**
+     * Takes back the last Set or added pause (one undo step), selects the line again and jumps the playback to the line before it, at most
+     * [Settings.undoJumpBackSec] seconds back; to the start of the song if no line before it has a time.
+     */
     fun undoLastTag() {
         val t = lastTag ?: return run { _messages.tryEmit("Nothing to undo") }
         lastTag = null
         if (_ui.value.lines != t.after) return run { _messages.tryEmit("The lyrics changed since, use Undo instead") }
         undo()
         t.selectedBefore?.let { id -> _ui.update { it.copy(selectedId = id, scrollToId = id) } }
-        t.jumpToMs?.let(::seekTo)
+        seekTo(Realign.undoJumpTarget(t.previousMs, player.currentPosition, _ui.value.settings.undoJumpBackSec * 1000L))
     }
 
     // ---------------------------------------------------------------- realign
@@ -569,6 +599,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         mutateLines { ls -> ls.toMutableList().apply { add(at, line) } }
         if (selectId != null) select(selectId) else if (!keepSelected) select(line.id)
+        // Long-press on the button takes this back like an undone Set ([undoLastTag]).
+        lastTag = LastTag(_ui.value.lines, s.selectedId, s.lines.subList(0, at).lastOrNull { it.timeMs != null }?.timeMs)
     }
 
     fun startEditText(id: Long?) = _ui.update { it.copy(editingTextId = id) }
@@ -760,8 +792,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun currentUriString(): String? = currentUri
 
     /** Marks the open song as having broken lyrics (shown in the Fix list), or removes the mark. */
-    fun toggleBrokenLyrics() {
-        val uri = currentUri
+    fun toggleBrokenLyrics(uri: String? = currentUri) {
         if (uri == null) { _messages.tryEmit("Open a song from your library first"); return }
         _messages.tryEmit(if (flagStore.toggle(uri)) "Marked as broken. It is now in the Fix list." else "Mark removed")
         logFlaggedFiles()
@@ -915,14 +946,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val bytes = Id3.update(src, text, tags)
                     val out = getApplication<Application>().contentResolver.openOutputStream(uri, "wt") ?: error("no output stream")
                     out.use { it.write(bytes) }
-                    tags
+                    tags to Id3.readMeta(bytes.inputStream(), bytes.size.toLong()).hasWork
                 }
             }
-            r.onSuccess { tags ->
+            r.onSuccess { (tags, hasWork) ->
                 markClean()
                 val lyrics = if (Lrc.hasLyrics(lines)) LyricsState.SYNCED else LyricsState.NONE
                 val duration = _ui.value.durationMs.takeIf { it > 0 }
-                val counts = Issues.countSong(tags, text, durationMs = duration)
+                val counts = Issues.countSong(tags, text, durationMs = duration, hasWork = hasWork)
                 val gaps = Issues.breakGaps(text)
                 library.updateEntry(uriString) {
                     it.copy(tags = tags, lyrics = lyrics, issues = counts.keys.toList(), counts = counts,
@@ -994,6 +1025,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (_ui.value.settings.confirmOverwrite) _ui.update { it.copy(pendingTag = action) } else runTagAction(action)
     }
 
+    fun requestFixConsecutiveEmpty(uris: List<String>) {
+        if (uris.isEmpty()) return run { _messages.tryEmit("Nothing to fix") }
+        val action = TagAction.FixConsecutiveEmpty(uris)
+        if (_ui.value.settings.confirmOverwrite) _ui.update { it.copy(pendingTag = action) } else runTagAction(action)
+    }
+
     fun requestFixLeadingEmpty(uris: List<String>) {
         if (uris.isEmpty()) return run { _messages.tryEmit("Nothing to fix") }
         val action = TagAction.FixLeadingEmpty(uris)
@@ -1017,20 +1054,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (ok) _messages.tryEmit("${a.name}: ${if (a.state == LearnState.NONE) "learning tag removed" else a.state.label}")
                 else if (a.uri != currentUri) _messages.tryEmit("Can't write to ${a.name} — choose the music folder again in Settings")
             }
-            is TagAction.FixLeadingEmpty -> viewModelScope.launch {
-                val songs = a.uris
-                _ui.update { it.copy(busy = true) }
-                var fixed = 0
-                var skipped = 0
-                for (s in songs) {
-                    // The open song has its own working copy; fix that one in the editor.
-                    if (s == currentUri) { skipped++; continue }
-                    if (removeLeadingEmpty(s)) fixed++ else skipped++
-                }
-                _ui.update { it.copy(busy = false) }
-                _messages.tryEmit("Removed the empty first line from $fixed song${if (fixed == 1) "" else "s"}" +
-                    if (skipped > 0) " ($skipped skipped: open in the editor, has a synced frame, or could not be written)" else "")
-            }
+            is TagAction.FixLeadingEmpty -> fixLyricsInFiles(a.uris, "the empty first line", Lrc::removeLeadingEmpty)
+            is TagAction.FixConsecutiveEmpty -> fixLyricsInFiles(a.uris, "the repeated empty lines", Lrc::removeConsecutiveEmpty)
             is TagAction.FixAll -> viewModelScope.launch {
                 val songs = brokenTagSongs()
                 _ui.update { it.copy(busy = true) }
@@ -1044,8 +1069,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Removes the empty lines that start the lyrics of a song's file. False if it couldn't (or mustn't) be changed. */
-    private suspend fun removeLeadingEmpty(uriString: String): Boolean {
+    /** Applies [fix] to the lyrics of each song's file in turn and reports the outcome. [what] is for the message. */
+    private fun fixLyricsInFiles(uris: List<String>, what: String, fix: (String) -> String?) = viewModelScope.launch {
+        _ui.update { it.copy(busy = true) }
+        var fixed = 0
+        var skipped = 0
+        for (s in uris) {
+            // The open song has its own working copy; fix that one in the editor.
+            if (s == currentUri) { skipped++; continue }
+            if (fixLyricsText(s, fix)) fixed++ else skipped++
+        }
+        _ui.update { it.copy(busy = false) }
+        _messages.tryEmit("Removed $what from $fixed song${if (fixed == 1) "" else "s"}" +
+            if (skipped > 0) " ($skipped skipped: open in the editor, has a synced frame, or could not be written)" else "")
+    }
+
+    /** Rewrites the lyrics text of a song's file with [fix]. False if it couldn't (or mustn't) be changed, or there was nothing to fix. */
+    private suspend fun fixLyricsText(uriString: String, fix: (String) -> String?): Boolean {
         val res = withContext(Dispatchers.IO) {
             runCatching {
                 val resolver = getApplication<Application>().contentResolver
@@ -1054,17 +1094,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val parsed = Id3.parse(bytes)
                 // Saving would replace a synced (SYLT) frame by plain text, so those are left alone.
                 if (parsed.frames.any { it.id == "SYLT" }) return@runCatching null
-                val fixed = Id3.rawLyricsText(parsed)?.let(Lrc::removeLeadingEmpty) ?: return@runCatching null
+                val fixed = Id3.rawLyricsText(parsed)?.let(fix) ?: return@runCatching null
                 val out = Id3.embedLyrics(bytes, fixed)
                 (resolver.openOutputStream(uri, "wt") ?: error("no output stream")).use { it.write(out) }
                 Id3.readMeta(out.inputStream(), out.size.toLong())
-            }.onFailure { android.util.Log.w("FixLeadingEmpty", "Could not fix $uriString", it) }
+            }.onFailure { android.util.Log.w("FixLyrics", "Could not fix $uriString", it) }
         }
         val meta = res.getOrNull() ?: return false
         library.updateEntry(uriString) {
             val tags = Search.parseTags(meta.grouping)
             val duration = meta.durationMs ?: it.durationMs.takeIf { d -> d > 0 }
-            val counts = Issues.countSong(tags, meta.lyricsText, meta.syltOnly, duration)
+            val counts = Issues.countSong(tags, meta.lyricsText, meta.syltOnly, duration, meta.hasWork)
             it.copy(tags = tags, lyrics = meta.lyrics, issues = counts.keys.toList(), counts = counts, durationMs = duration ?: 0, breakGapsMs = Issues.breakGaps(meta.lyricsText))
         }
         return true
@@ -1088,20 +1128,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val newTags = transform(tags, lines)
                 // Only touch the working copy (which restarts the player) if its tags actually differ.
                 if (isOpen && newTags != sessionTags()) applyTagsToSession(newTags)
+                var hasWork = meta.hasWork
                 if (newTags != tags) {
+                    val written = Id3.setGrouping(bytes, newTags)
                     val out = resolver.openOutputStream(uri, "wt") ?: error("no output stream")
-                    out.use { it.write(Id3.setGrouping(bytes, newTags)) }
+                    out.use { it.write(written) }
+                    hasWork = Id3.readMeta(written.inputStream(), written.size.toLong()).hasWork
                 }
-                Triple(newTags, meta, lines)
+                Triple(newTags, meta, hasWork)
             }
         }
-        val (tags, meta, _) = res.getOrElse {
+        val (tags, meta, hasWork) = res.getOrElse {
             if (isOpen) { _messages.tryEmit("Can't write to the original file — choose where to save instead"); _saveAs.tryEmit(ExportKind.MP3) }
             return false
         }
         library.updateEntry(uriString) {
             val duration = meta.durationMs ?: it.durationMs.takeIf { d -> d > 0 }
-            val counts = Issues.countSong(tags, meta.lyricsText, meta.syltOnly, duration)
+            val counts = Issues.countSong(tags, meta.lyricsText, meta.syltOnly, duration, hasWork)
             it.copy(tags = tags, issues = counts.keys.toList(), counts = counts, durationMs = duration ?: 0, breakGapsMs = Issues.breakGaps(meta.lyricsText))
         }
         if (isOpen) _ui.update { it.copy(tags = tags) }
@@ -1109,9 +1152,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Rewrites the grouping in the working copy and re-prepares the player (the audio moved inside the file). */
-    private suspend fun applyTagsToSession(tags: List<String>) {
+    private suspend fun applyTagsToSession(tags: List<String>) = applyBytesToSession { Id3.setGrouping(it, tags) }
+
+    /** Replaces the working copy by [transform] of it and re-prepares the player (the audio moved inside the file). */
+    private suspend fun applyBytesToSession(transform: (ByteArray) -> ByteArray) {
         val file = sessions.audioFile
-        val bytes = Id3.setGrouping(file.readBytes(), tags)
+        val bytes = transform(file.readBytes())
         val tmp = java.io.File(file.path + ".tmp")
         tmp.writeBytes(bytes)
         tmp.renameTo(file)
@@ -1121,6 +1167,81 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)), pos)
             player.prepare()
             player.playWhenReady = wasPlaying
+        }
+    }
+
+    // ---------------------------------------------------------------- metadata editor
+
+    private val _meta = MutableStateFlow<MetaState?>(null)
+    val meta: StateFlow<MetaState?> = _meta.asStateFlow()
+
+    /**
+     * Makes the metadata editor show the song that is open in the editor (re-read from the file, so changes made by saving
+     * lyrics show up). Edits not saved yet are kept while it is still the same song.
+     */
+    fun syncMetadata() {
+        val uriString = currentUri
+        val cur = _meta.value
+        if (uriString == null) { _meta.value = null; return }
+        if (cur != null && cur.uri == uriString && (cur.changed || cur.saving)) return
+        viewModelScope.launch {
+            val res = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bytes = getApplication<Application>().contentResolver.openInputStream(uriString.toUri())?.use { it.readBytes() } ?: error("Could not open file")
+                    MetaFields.read(bytes)
+                }
+            }
+            res.onSuccess { values ->
+                // Another song may have been opened while this was reading.
+                if (uriString != currentUri) return@onSuccess
+                val keep = _meta.value?.takeIf { it.uri == uriString }
+                _meta.value = MetaState(uriString, _ui.value.fileName ?: "song", values, values, keep?.added.orEmpty())
+            }.onFailure { _messages.tryEmit("Can't read that file (${it.javaClass.simpleName})") }
+        }
+    }
+
+    fun setMetaField(f: MetaField, text: String) = _meta.update { m -> m?.copy(values = m.values + (f to text)) }
+    fun addMetaField(f: MetaField) = _meta.update { m -> m?.copy(added = m.added + f) }
+    fun revertMeta() = _meta.update { m -> m?.copy(values = m.original, added = emptySet()) }
+
+    /** Moves the Work (TIT1) text into the grouping. */
+    fun convertWorkToGrouping() = _meta.update { m -> m?.copy(values = MetaFields.convertWork(m.values)) }
+
+    fun saveMeta() {
+        val m = _meta.value ?: return
+        if (!m.changed || m.saving) return
+        _meta.value = m.copy(saving = true)
+        viewModelScope.launch {
+            val isOpen = m.uri == currentUri
+            val res = withContext(Dispatchers.IO) {
+                runCatching {
+                    val resolver = getApplication<Application>().contentResolver
+                    val uri = m.uri.toUri()
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Could not open file")
+                    val written = MetaFields.write(bytes, m.original, m.values)
+                    (resolver.openOutputStream(uri, "wt") ?: error("no output stream")).use { it.write(written) }
+                    if (isOpen) applyBytesToSession { MetaFields.write(it, m.original, m.values) }
+                    written
+                }
+            }
+            res.onFailure {
+                _meta.update { cur -> cur?.copy(saving = false) }
+                _messages.tryEmit("Can't write to the file (${it.javaClass.simpleName}) — choose the music folder again in Settings")
+            }
+            res.onSuccess { written ->
+                val meta = Id3.readMeta(written.inputStream(), written.size.toLong())
+                val tags = Search.parseTags(meta.grouping)
+                library.updateEntry(m.uri) {
+                    val duration = meta.durationMs ?: it.durationMs.takeIf { d -> d > 0 }
+                    val counts = Issues.countSong(tags, meta.lyricsText, meta.syltOnly, duration, meta.hasWork)
+                    it.copy(title = meta.title, artist = meta.artist, album = meta.album, tags = tags, issues = counts.keys.toList(), counts = counts,
+                        durationMs = duration ?: 0)
+                }
+                if (isOpen) _ui.update { it.copy(tags = tags) }
+                val saved = withContext(Dispatchers.Default) { MetaFields.read(written) }
+                _meta.update { cur -> cur?.copy(original = saved, values = saved, saving = false) }
+                _messages.tryEmit("Saved the metadata of ${m.fileName}")
+            }
         }
     }
 
@@ -1138,37 +1259,84 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    /** Looks for lyrics online; the result is shown in a preview and only applied when accepted. */
+    /** Opens the lyrics search screen and asks every enabled source at once. Nothing changes until a result is accepted. */
     fun fetchLyrics() {
         if (!_ui.value.loaded) return
         fetchJob?.cancel()
-        _ui.update { it.copy(fetch = FetchState.Loading) }
         val cfg = _ui.value.settings
+        val enabled = cfg.lyricsSources.filter { it.enabled }.map { it.source }
+        val q = lyricsQuery()
+        val title = listOf(q.title, q.artist).filter { it.isNotBlank() }.joinToString(" — ")
+        _ui.update { it.copy(fetch = FetchState(title, enabled.map { s -> SourceRun(s) })) }
+        if (enabled.isEmpty()) { _messages.tryEmit("No lyrics source is turned on. Enable one in Settings > Lyrics sources."); return }
+        val timeout = cfg.lyricsTimeoutSec * 1000
         fetchJob = viewModelScope.launch {
-            val enabled = cfg.lyricsSources.filter { it.enabled }
-            if (enabled.isEmpty()) {
-                _ui.update { it.copy(fetch = FetchState.Failed("No lyrics source is turned on. Enable one in Settings > Lyrics sources.")) }
-                return@launch
-            }
-            val timeout = cfg.lyricsTimeoutSec * 1000
-            val providers = enabled.map {
-                when (it.source) {
-                    LyricsSource.LRCLIB -> LrclibProvider(timeout)
-                    LyricsSource.NETEASE -> NeteaseProvider(timeout)
-                    LyricsSource.LYRICSIFY -> LyricsifyProvider(timeout)
+            coroutineScope {
+                enabled.forEachIndexed { i, source ->
+                    launch {
+                        val run = try {
+                            SourceRun(source, SourceStatus.DONE, withContext(Dispatchers.IO) { LyricsFetcher.searchSource(source.provider(timeout), q) })
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            runCatching { android.util.Log.w("LyricsFetch", "${source.label} failed", e) }
+                            SourceRun(source, SourceStatus.FAILED, error = "${e.javaClass.simpleName}: ${e.message ?: ""}".trimEnd(' ', ':'))
+                        }
+                        _ui.update { st ->
+                            val f = st.fetch ?: return@update st
+                            val runs = f.runs.mapIndexed { n, r -> if (n == i) run else r }
+                            // Until the user picks something, the preview shows the best candidate found so far.
+                            val shown = if (f.picked || f.pasted != null) f.shown else LyricsFetcher.best(runs.map { it.results })
+                            st.copy(fetch = f.copy(runs = runs, shown = shown))
+                        }
+                    }
                 }
             }
-            val outcome = withContext(Dispatchers.IO) { LyricsFetcher.fetch(lyricsQuery(), providers) }
-            if (outcome.errors.isNotEmpty()) logNetworkState()
-            val state = outcome.result?.let { FetchState.Found(it) } ?: FetchState.Failed(
-                if (outcome.errors.size == providers.size) "Couldn't reach any lyrics source. Check your internet connection (on GrapheneOS also the app's Network permission).\n" + outcome.errors.joinToString("\n")
-                else "No lyrics found for this song." + outcome.errors.joinToString("") { "\n$it" }
-            )
-            _ui.update { if (it.fetch == FetchState.Loading) it.copy(fetch = state) else it }
+            val f = _ui.value.fetch
+            if (f != null && f.runs.any { it.status == SourceStatus.FAILED }) logNetworkState()
+        }
+    }
+
+    /** Previews candidate [index] of source [source] (an index into [FetchState.runs]). */
+    fun showFetched(source: Int, index: Int) = _ui.update { s ->
+        val f = s.fetch ?: return@update s
+        if (f.runs.getOrNull(source)?.results?.getOrNull(index) == null) s
+        else s.copy(fetch = f.copy(shown = source to index, picked = true, pasted = null))
+    }
+
+    /** Previews the next candidate of the shown source, to skip a wrong match; after the last one, the first of the next source with any. */
+    fun showNextFetched() = _ui.update { s ->
+        val f = s.fetch ?: return@update s
+        val (src, idx) = f.shown ?: return@update s
+        val next = if (idx + 1 < f.runs[src].results.size) src to idx + 1
+        else f.runs.indices.map { (src + 1 + it) % f.runs.size }.firstOrNull { f.runs[it].results.isNotEmpty() }?.let { it to 0 } ?: return@update s
+        s.copy(fetch = f.copy(shown = next, picked = true, pasted = null))
+    }
+
+    // ---------------------------------------------------------------- connectivity
+
+    private val _online = MutableStateFlow(true)
+    /** Whether the phone has a network that claims internet access. Fetching lyrics needs it. */
+    val online: StateFlow<Boolean> = _online.asStateFlow()
+
+    private fun watchConnectivity() {
+        val cm = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)
+        val has = android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET
+        val available = HashSet<android.net.Network>()
+        fun refresh() { _online.value = available.isNotEmpty() }
+        runCatching {
+            available += cm.allNetworks.filter { cm.getNetworkCapabilities(it)?.hasCapability(has) == true }
+            refresh()
+            val request = android.net.NetworkRequest.Builder().addCapability(has).build()
+            cm.registerNetworkCallback(request, object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) { synchronized(available) { available += network; refresh() } }
+                override fun onLost(network: android.net.Network) { synchronized(available) { available -= network; refresh() } }
+            })
         }
     }
 
     init {
+        watchConnectivity()
         Http.networkProvider = {
             val cm = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)
             // The active network if it has internet; otherwise any network that claims to.
@@ -1209,11 +1377,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             lines += "Timeout per request: $timeoutSec s"
             lines += networkState()
             for (src in LyricsSource.entries) {
-                val provider = when (src) {
-                    LyricsSource.LRCLIB -> LrclibProvider(timeoutSec * 1000)
-                    LyricsSource.NETEASE -> NeteaseProvider(timeoutSec * 1000)
-                    LyricsSource.LYRICSIFY -> LyricsifyProvider(timeoutSec * 1000)
-                }
+                val provider = src.provider(timeoutSec * 1000)
                 val started = System.currentTimeMillis()
                 val line = try {
                     val n = withContext(Dispatchers.IO) { provider.search(q) }.size
@@ -1237,14 +1401,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun dismissFetch() { fetchJob?.cancel(); _ui.update { it.copy(fetch = null) } }
 
     fun setUseRomanization(on: Boolean) =
-        _ui.update { s -> (s.fetch as? FetchState.Found)?.let { s.copy(fetch = it.copy(useRomanization = on)) } ?: s }
+        _ui.update { s -> s.fetch?.let { s.copy(fetch = it.copy(useRomanization = on)) } ?: s }
 
     fun acceptFetched() {
-        val f = _ui.value.fetch as? FetchState.Found ?: return
+        val f = _ui.value.fetch ?: return
+        fetchJob?.cancel()
         _ui.update { it.copy(fetch = null) }
+        val r = f.current ?: return
         if (!replaceAllLyrics(f.text)) return
-        _messages.tryEmit(if (f.result.synced) "Lyrics from ${f.result.source} loaded — save to keep them"
-        else "Plain lyrics from ${f.result.source} loaded — set the times, then save")
+        _messages.tryEmit(if (r.synced) "Lyrics from ${r.source} loaded — save to keep them"
+        else "Plain lyrics from ${r.source} loaded — set the times, then save")
     }
 
     /** Manual route for sources that block the app: the user copies the lyrics in the browser and pastes them here. */
@@ -1253,7 +1419,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(getApplication())?.toString().orEmpty().trim()
         if (text.isEmpty()) return run { _messages.tryEmit("The clipboard is empty") }
         val synced = Lrc.looksLikeLrc(text)
-        _ui.update { it.copy(fetch = FetchState.Found(LyricsResult("Clipboard", synced, text, "Pasted text", 1.0))) }
+        _ui.update { s -> s.fetch?.let { s.copy(fetch = it.copy(pasted = LyricsResult("Clipboard", synced, text, "Pasted text", 1.0), useRomanization = false)) } ?: s }
     }
 
     fun openLyricsInBrowser() {

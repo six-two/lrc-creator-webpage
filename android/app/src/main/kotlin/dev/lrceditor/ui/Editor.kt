@@ -102,7 +102,11 @@ fun EditorScreen(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Unit, onSa
                     } else Text("No lyrics yet.", color = Studio.Dim)
                     Spacer(Modifier.height(12.dp))
                     if (ui.rawLyrics == null) {
-                        Button(onClick = vm::fetchLyrics) { Icon(Icons.Filled.CloudDownload, null); Spacer(Modifier.width(8.dp)); Text("Fetch lyrics") }
+                        val online by vm.online.collectAsStateWithLifecycle()
+                        Button(onClick = vm::fetchLyrics, enabled = online) {
+                            Icon(if (online) Icons.Filled.CloudDownload else Icons.Filled.CloudOff, null); Spacer(Modifier.width(8.dp))
+                            Text(if (online) "Fetch lyrics" else "Offline — can't fetch lyrics")
+                        }
                         OutlinedButton(onClick = vm::openLyricsDialog) { Text("Paste lyrics") }
                     }
                 }
@@ -139,7 +143,9 @@ private fun EditorHeader(vm: EditorViewModel, ui: UiState, onSaveLrcAs: () -> Un
                 DropdownMenuItem(text = { Text("Realign timings…") }, leadingIcon = { Icon(Icons.Filled.MoreTime, null) },
                     enabled = ui.realign == null && ui.lines.any { it.timeMs != null && it.text.isNotBlank() },
                     onClick = { menu = false; vm.startRealign() })
-                DropdownMenuItem(text = { Text("Fetch lyrics…") }, leadingIcon = { Icon(Icons.Filled.CloudDownload, null) },
+                val online by vm.online.collectAsStateWithLifecycle()
+                DropdownMenuItem(text = { Text(if (online) "Fetch lyrics…" else "Fetch lyrics (offline)") }, enabled = online,
+                    leadingIcon = { Icon(if (online) Icons.Filled.CloudDownload else Icons.Filled.CloudOff, null) },
                     onClick = { menu = false; vm.fetchLyrics() })
                 DropdownMenuItem(text = { Text("Import / edit lyrics text…") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Notes, null) },
                     onClick = { menu = false; vm.openLyricsDialog() })
@@ -411,10 +417,17 @@ private fun PlayerBar(vm: EditorViewModel, ui: UiState) {
                         Icon(Icons.Filled.AccessTime, null); Spacer(Modifier.width(6.dp)); Text("Set", maxLines = 1, softWrap = false)
                     }
                 }
-                OutlinedButton(onClick = vm::insertPauseLine, modifier = Modifier.weight(1f).height(if (compact) 44.dp else 52.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp)) {
-                    // "+ pause": add a pause line at the playhead.
-                    Icon(Icons.Filled.Add, null, Modifier.size(16.dp)); Icon(Icons.Filled.Pause, "Add pause line")
+                // Tap adds a pause line at the playhead; long press takes the last Set or pause back (like Set does).
+                Surface(
+                    shape = ButtonDefaults.outlinedShape, color = androidx.compose.ui.graphics.Color.Transparent,
+                    contentColor = MaterialTheme.colorScheme.primary, border = ButtonDefaults.outlinedButtonBorder(),
+                    modifier = Modifier.weight(1f).height(if (compact) 44.dp else 52.dp).combinedClickable(
+                        role = Role.Button, onClick = vm::insertPauseLine, onLongClick = vm::undoLastTag,
+                    ),
+                ) {
+                    Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                        Icon(Icons.Filled.Add, null, Modifier.size(16.dp)); Icon(Icons.Filled.Pause, "Add pause line")
+                    }
                 }
             }
         }

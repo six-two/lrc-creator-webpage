@@ -18,7 +18,7 @@ class NeteaseProvider(private val timeoutMs: Int) : LyricsProvider {
         if (term.isBlank()) return@withContext emptyList()
         val r = Http.get("https://music.163.com/api/search/get?s=${Http.enc(term)}&type=1&limit=8&offset=0", timeoutMs, headers)
         Http.requireOk(r, name)
-        val best = parseSearch(r.body, q).filter { it.score >= LyricsMatch.MIN_SCORE }.sortedByDescending { it.score }.take(2)
+        val best = parseSearch(r.body, q).filter { it.score >= LyricsMatch.LIST_SCORE }.sortedByDescending { it.score }.take(MAX_CANDIDATES)
         val out = ArrayList<LyricsResult>()
         for (c in best) {
             val lr = Http.get("https://music.163.com/api/song/lyric?id=${c.id}&lv=1&tv=-1&rv=-1", timeoutMs, headers)
@@ -29,6 +29,7 @@ class NeteaseProvider(private val timeoutMs: Int) : LyricsProvider {
     }
 
     companion object {
+        private const val MAX_CANDIDATES = 5
         private val CREDIT = Regex(
             """^\s*(作词|作詞|作曲|编曲|編曲|制作人|製作人|监制|監製|混音|母带|母帶|词|詞|曲|Lyrics|Composer|Arranger|Producer)\s*[:：]""",
             RegexOption.IGNORE_CASE,

@@ -18,7 +18,7 @@ class LyricsifyProvider(private val timeoutMs: Int) : LyricsProvider {
         checkNotChallenge(r)
         Http.requireOk(r, name)
         val out = ArrayList<LyricsResult>()
-        for ((path, score) in candidateLinks(r.body, q).take(2)) {
+        for ((path, score) in candidateLinks(r.body, q).take(3)) {
             val page = Http.get("https://www.lyricsify.com$path", timeoutMs, headers)
             checkNotChallenge(page)
             Http.requireOk(page, name)

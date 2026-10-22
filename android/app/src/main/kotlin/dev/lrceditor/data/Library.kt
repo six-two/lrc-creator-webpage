@@ -224,7 +224,7 @@ class LibraryRepository(private val context: Context) {
                     val tags = Search.parseTags(meta?.grouping.orEmpty())
                     // A song whose lyrics can't be checked must never abort the whole scan.
                     val counts = meta?.let { m ->
-                        runCatching { Issues.countSong(tags, m.lyricsText, m.syltOnly, m.durationMs) }
+                        runCatching { Issues.countSong(tags, m.lyricsText, m.syltOnly, m.durationMs, m.hasWork) }
                             .onFailure { Log.e(TAG, "Could not check ${c.name}", it) }.getOrDefault(emptyMap())
                     } ?: emptyMap()
                     val gaps = runCatching { Issues.breakGaps(meta?.lyricsText) }.getOrDefault(emptyList())
@@ -306,7 +306,7 @@ class LibraryRepository(private val context: Context) {
          * be used as is: a field is added, removed or changes meaning, or [Issues.checkSong] gains or changes a check. The app
          * then rebuilds the index with a full rescan in the background on the next start.
          */
-        const val DATA_VERSION = 6L
+        const val DATA_VERSION = 7L
         const val READ_PARALLELISM = 8
         const val LIST_PARALLELISM = 8
         const val MAX_AGE_MS = 2L * 24 * 60 * 60 * 1000

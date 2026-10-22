@@ -138,6 +138,8 @@ object Id3 {
         val lyricsText: String? = null, val syltOnly: Boolean = false,
         /** Length of the audio, worked out from the first MPEG frame (Xing/VBRI frame count, else the constant bitrate). Null if unknown. */
         val durationMs: Long? = null,
+        /** The file has a Work (TIT1) frame. This app stores the grouping in GRP1, so TIT1 usually means a grouping written by an older version. */
+        val hasWork: Boolean = false,
     )
 
     private val META_FRAMES = setOf("TIT2", "TPE1", "TALB", "TIT1", "GRP1", "USLT")
@@ -164,7 +166,8 @@ object Id3 {
 
     /**
      * Reads title/artist/album/grouping from the start of a stream without loading the whole tag
-     * (album art frames are skipped, not read). TIT1 and the iTunes GRP1 frame both count as grouping.
+     * (album art frames are skipped, not read). The grouping is the iTunes GRP1 frame; a file without one (older versions of this
+     * app wrote TIT1) falls back to TIT1, which is really the "Work".
      */
     fun readMeta(input: InputStream, fileSize: Long = -1): Meta {
         val empty = Meta("", "", "", "", LyricsState.NONE)
@@ -270,20 +273,27 @@ object Id3 {
         }
     }
 
+    /** The non-empty values of the text frames [id]; v2.4 multi-values are NUL separated. */
+    private fun textValues(frames: List<Frame>, id: String): List<String> = frames.filter { it.id == id && it.data.size > 1 }.flatMap {
+        decodeText(it.data.copyOfRange(1, it.data.size), u(it.data, 0)).split('\u0000')
+    }.map { it.trim() }.filter { it.isNotEmpty() }
+
+    /** The grouping: GRP1, or when there is none the TIT1 an older version of this app wrote it to. */
+    private fun groupingValues(frames: List<Frame>): List<String> =
+        textValues(frames, "GRP1").ifEmpty { textValues(frames, "TIT1") }
+
     private fun metaFromFrames(frames: List<Frame>, durationMs: Long? = null): Meta {
-        // Text frames: encoding byte + text; v2.4 multi-values are NUL separated.
-        fun values(id: String): List<String> = frames.filter { it.id == id && it.data.size > 1 }.flatMap {
-            decodeText(it.data.copyOfRange(1, it.data.size), u(it.data, 0)).split('\u0000')
-        }.map { it.trim() }.filter { it.isNotEmpty() }
+        fun values(id: String) = textValues(frames, id)
         return Meta(
             values("TIT2").firstOrNull().orEmpty(),
             values("TPE1").firstOrNull().orEmpty(),
             values("TALB").firstOrNull().orEmpty(),
-            (values("TIT1") + values("GRP1")).joinToString(";"),
+            groupingValues(frames).joinToString(";"),
             lyricsState(frames),
             usltTexts(frames).firstOrNull(),
             frames.any { it.id == "SYLT" } && usltTexts(frames).isEmpty(),
             durationMs,
+            hasWork = textValues(frames, "TIT1").isNotEmpty(),
         )
     }
 
@@ -322,42 +332,61 @@ object Id3 {
         return frameBytes("USLT", payload)
     }
 
-    /** The grouping text frame: encoding byte + text. Keeps UTF-16 if the frame had it, else ISO-8859-1 when possible. */
-    private fun groupingPayload(text: String, oldEnc: Int): ByteArray {
+    /** A text frame's payload: encoding byte + text. Keeps UTF-16 if the old frame had it, else ISO-8859-1 when possible. */
+    private fun textPayload(text: String, oldEnc: Int): ByteArray {
         val latin1 = text.all { it.code <= 0xFF }
         if (latin1 && oldEnc != 1 && oldEnc != 2) return byteArrayOf(0) + text.toByteArray(Charsets.ISO_8859_1)
         return byteArrayOf(1, 0xFF.toByte(), 0xFE.toByte()) + text.toByteArray(Charset.forName("UTF-16LE"))
     }
 
+    private fun tagHeader(bodySize: Int): ByteArray {
+        val n = bodySize
+        return byteArrayOf(0x49, 0x44, 0x33, 3, 0, 0,
+            ((n ushr 21) and 0x7F).toByte(), ((n ushr 14) and 0x7F).toByte(), ((n ushr 7) and 0x7F).toByte(), (n and 0x7F).toByte())
+    }
+
     /**
      * Rewrites the file with a fresh ID3v2.3 tag. All frames are kept verbatim except:
      *  - [lrcText] != null: USLT/SYLT are replaced by one new USLT.
-     *  - [tags] != null: the grouping (TIT1 / GRP1) is set to those tags. Whichever of the two exist are rewritten;
-     *    if neither does, TIT1 is created. An empty list removes them.
+     *  - [tags] != null: the grouping is set to those tags, in one GRP1 frame (the iTunes grouping; TIT1 is the "Work" in most
+     *    taggers). A TIT1 that was standing in for a missing GRP1 (see [groupingValues]) is removed, as it held the old grouping.
+     *    An empty list removes the grouping. Tags equal to the current ones change nothing.
+     *  - [other] (frame id -> text): those text frames are replaced; null or blank removes the frame.
      * The audio data is copied unchanged.
      */
-    fun update(file: ByteArray, lrcText: String?, tags: List<String>?, language: String = "und"): ByteArray {
+    fun update(file: ByteArray, lrcText: String?, tags: List<String>?, language: String = "und", other: Map<String, String?> = emptyMap()): ByteArray {
         val parsed = parse(file)
         val audio = file.copyOfRange(parsed.audioStart, file.size)
         val frames = ByteArrayOutputStream()
-        val groupText = tags?.joinToString("; ")
-        val groupIds = parsed.frames.map { it.id }.filter { it == "TIT1" || it == "GRP1" }.toSet()
+        // Unchanged tags leave the grouping frames alone (a TIT1 stays until the metadata editor moves it).
+        val unchanged = tags != null && tags == Search.parseTags(groupingValues(parsed.frames).joinToString(";"))
+        val groupText = if (unchanged) null else tags?.joinToString("; ")
+        val legacyGrouping = textValues(parsed.frames, "GRP1").isEmpty()
+        val groupEnc = parsed.frames.firstOrNull { it.id == "GRP1" || (legacyGrouping && it.id == "TIT1") }?.let { u(it.data, 0) } ?: 0
+        var groupWritten = false
         for (f in parsed.frames) {
             when {
                 lrcText != null && (f.id == "USLT" || f.id == "SYLT") -> {}
-                groupText != null && (f.id == "TIT1" || f.id == "GRP1") ->
-                    if (groupText.isNotEmpty()) frames.write(frameBytes(f.id, groupingPayload(groupText, u(f.data, 0))))
+                // The grouping takes the place of the first frame that held it.
+                groupText != null && (f.id == "GRP1" || (legacyGrouping && f.id == "TIT1")) -> {
+                    if (!groupWritten && groupText.isNotEmpty()) frames.write(frameBytes("GRP1", textPayload(groupText, groupEnc)))
+                    groupWritten = true
+                }
+                f.id in other -> {}
                 else -> frames.write(frameBytes(f.id, f.data))
             }
         }
+        for ((id, text) in other) {
+            if (text.isNullOrBlank()) continue
+            val oldEnc = parsed.frames.firstOrNull { it.id == id }?.let { u(it.data, 0) } ?: 0
+            frames.write(frameBytes(id, textPayload(text, oldEnc)))
+        }
         if (lrcText != null) frames.write(buildUsltFrame(lrcText, language))
-        if (!groupText.isNullOrEmpty() && groupIds.isEmpty()) frames.write(frameBytes("TIT1", groupingPayload(groupText, 0)))
+        if (!groupText.isNullOrEmpty() && !groupWritten) frames.write(frameBytes("GRP1", textPayload(groupText, groupEnc)))
         val body = frames.toByteArray()
 
         val out = ByteArrayOutputStream(10 + body.size + audio.size)
-        out.write(byteArrayOf(0x49, 0x44, 0x33, 3, 0, 0))
-        val n = body.size
-        out.write(byteArrayOf(((n ushr 21) and 0x7F).toByte(), ((n ushr 14) and 0x7F).toByte(), ((n ushr 7) and 0x7F).toByte(), (n and 0x7F).toByte()))
+        out.write(tagHeader(body.size))
         out.write(body)
         out.write(audio)
         return out.toByteArray()
@@ -366,4 +395,38 @@ object Id3 {
     fun embedLyrics(file: ByteArray, lrcText: String, language: String = "und"): ByteArray = update(file, lrcText, null, language)
 
     fun setGrouping(file: ByteArray, tags: List<String>): ByteArray = update(file, null, tags)
+
+    /** Replaces the text frames in [changes] (frame id -> text; null or blank removes the frame). Everything else is kept. */
+    fun setTextFrames(file: ByteArray, changes: Map<String, String?>): ByteArray = update(file, null, null, other = changes)
+
+    /** Text of the frame [id] for the metadata editor: all values joined with "; ", empty if there is none. */
+    fun textOf(parsed: Parsed, id: String): String = textValues(parsed.frames, id).joinToString("; ")
+
+    /** Text of the first comment (COMM) frame without a description, empty if there is none. */
+    fun commentOf(parsed: Parsed): String = parsed.frames.filter { it.id == "COMM" && it.data.size > 4 }.firstNotNullOfOrNull { f ->
+        runCatching {
+            val enc = u(f.data, 0)
+            val sp = splitDescriptorAndText(f.data.copyOfRange(4, f.data.size), enc)
+            decodeText(sp.textBytes, enc).takeIf { sp.descriptor.isEmpty() }
+        }.getOrNull()
+    }.orEmpty()
+
+    /** Replaces the comment (COMM) frame without a description; other comment frames are kept. Blank removes it. */
+    fun setComment(file: ByteArray, text: String): ByteArray {
+        val parsed = parse(file)
+        val audio = file.copyOfRange(parsed.audioStart, file.size)
+        val frames = ByteArrayOutputStream()
+        for (f in parsed.frames) {
+            val mine = f.id == "COMM" && f.data.size > 4 &&
+                runCatching { splitDescriptorAndText(f.data.copyOfRange(4, f.data.size), u(f.data, 0)).descriptor.isEmpty() }.getOrDefault(false)
+            if (!mine) frames.write(frameBytes(f.id, f.data))
+        }
+        if (text.isNotBlank()) {
+            val payload = byteArrayOf(1, 'e'.code.toByte(), 'n'.code.toByte(), 'g'.code.toByte(), 0xFF.toByte(), 0xFE.toByte(), 0, 0,
+                0xFF.toByte(), 0xFE.toByte()) + text.toByteArray(Charset.forName("UTF-16LE"))
+            frames.write(frameBytes("COMM", payload))
+        }
+        val body = frames.toByteArray()
+        return tagHeader(body.size) + body + audio
+    }
 }

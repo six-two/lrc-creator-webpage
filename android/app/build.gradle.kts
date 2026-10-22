@@ -12,8 +12,8 @@ android {
         applicationId = "dev.lrceditor"
         minSdk = 36
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.0.7"
+        versionCode = 8
+        versionName = "0.0.8"
     }
 
     // Optional local dev key so installs from different machines can update each other. Set in
@@ -70,8 +70,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
-    implementation("androidx.datastore:datastore-preferences:1.2.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    implementation("androidx.datastore:datastore-preferences:1.3.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
     implementation("androidx.media3:media3-exoplayer:1.11.1")
 
     testImplementation("junit:junit:4.13.2")

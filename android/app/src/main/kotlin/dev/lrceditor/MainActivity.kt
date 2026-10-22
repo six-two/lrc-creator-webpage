@@ -7,6 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.lrceditor.ui.LrcApp
 import dev.lrceditor.ui.LrcTheme
 
@@ -18,7 +20,10 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         // Only handle the launching intent on a fresh start, not after rotation / process-restore.
         if (savedInstanceState == null) handleIntent(intent)
-        setContent { LrcTheme { LrcApp(vm) } }
+        setContent {
+            val ui by vm.ui.collectAsStateWithLifecycle()
+            LrcTheme(ui.settings.oledBlack) { LrcApp(vm) }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

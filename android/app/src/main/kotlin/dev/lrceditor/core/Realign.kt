@@ -4,6 +4,15 @@ package dev.lrceditor.core
 object Realign {
     const val DEFAULT_LINES = 5
     const val MAX_LINES = 20
+    const val DEFAULT_UNDO_JUMP_SEC = 3
+    const val MAX_UNDO_JUMP_SEC = 15
+
+    /**
+     * Where the playback goes after undoing a Set: the time of the timed line before it, but not further back than [maxBackMs]
+     * from [positionMs]. With no timed line before it ([previousMs] null) it goes to the start of the song.
+     */
+    fun undoJumpTarget(previousMs: Long?, positionMs: Long, maxBackMs: Long): Long =
+        if (previousMs == null) 0L else maxOf(previousMs, positionMs - maxBackMs, 0L)
 
     /** The first [count] lines to time again: those that have text and a time to compare with. */
     fun targets(lines: List<Line>, count: Int): List<Line> =

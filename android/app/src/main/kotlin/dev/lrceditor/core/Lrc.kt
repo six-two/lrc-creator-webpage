@@ -217,6 +217,26 @@ object Lrc {
         return if (dropped) keep.joinToString("\n") else null
     }
 
+    /**
+     * [text] with every timed empty line (a timestamp with no text) that directly follows another one removed, so a pause is
+     * one empty line. The first of a run stays. Everything else is kept as it is. Null if there is nothing to remove.
+     */
+    fun removeConsecutiveEmpty(text: String): String? {
+        val raw = text.split(NEWLINE_RE)
+        val keep = ArrayList<String>()
+        var prevEmpty = false
+        var dropped = false
+        for ((i, line) in raw.withIndex()) {
+            val next = raw.getOrNull(i + 1)
+            val hasContinuation = next != null && next.isNotBlank() && !METADATA_RE.matches(next) && !TAG_RE.containsMatchIn(next)
+            val empty = BLANK_TAGGED_RE.matches(line) && !hasContinuation
+            if (empty && prevEmpty) { dropped = true; continue }
+            prevEmpty = empty
+            keep += line
+        }
+        return if (dropped) keep.joinToString("\n") else null
+    }
+
     /** Plain lyrics import: every non-blank line becomes its own untimed entry. */
     fun plainTextToLines(text: String): List<Line> =
         text.split(NEWLINE_RE).map { it.trim() }.filter { it.isNotEmpty() }.map { newLine(null, it) }

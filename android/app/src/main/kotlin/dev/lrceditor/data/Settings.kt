@@ -31,7 +31,10 @@ enum class TimeSwipe(val label: String) {
 enum class LyricsSource(val id: String, val label: String, val note: String) {
     LRCLIB("lrclib", "LRCLIB", "Open lyrics database. Synced and plain text."),
     NETEASE("netease", "NetEase Cloud Music", "Large synced catalog, good for Asian music. Unofficial API; may be blocked in some regions."),
-    LYRICSIFY("lyricsify", "Lyricsify", "Best effort: the site blocks apps at times. You can then open it in the browser or paste.");
+    LYRICSIFY("lyricsify", "Lyricsify", "Best effort: the site blocks apps at times. You can then open it in the browser or paste."),
+    QQMUSIC("qqmusic", "QQ Music", "Large synced catalog, western songs too. Unofficial API; may be blocked in some regions."),
+    LRCAPI("lrcapi", "LrcApi (lrc.cx)", "One request that searches several sources at once. Synced or plain."),
+    LYRICS_OVH("lyricsovh", "lyrics.ovh", "Plain text only, no timing. A last resort when nothing synced exists.");
 }
 
 data class SourceSetting(val source: LyricsSource, val enabled: Boolean = true)
@@ -56,8 +59,12 @@ data class Settings(
     val autoAdvance: Boolean = true,
     /** How many of the first lines are timed again in realign mode. */
     val realignLines: Int = Realign.DEFAULT_LINES,
+    /** Undoing a Set (long-press / double-tap) jumps back at most this many seconds. */
+    val undoJumpBackSec: Int = Realign.DEFAULT_UNDO_JUMP_SEC,
     /** Hide the skip / play / speed / tick buttons under the progress bar; tapping the time plays and pauses instead. */
     val minimalPlayer: Boolean = false,
+    /** Pure black backgrounds, to save power and look right on OLED screens. */
+    val oledBlack: Boolean = false,
     /** An empty line followed by a lyric line less than this many ms later is a "short break" warning. */
     val minBreakMs: Long = Issues.DEFAULT_MIN_BREAK_MS,
     /** Ask before writing lyrics into the original MP3 in place. */
@@ -94,6 +101,8 @@ class SettingsStore(private val context: Context) {
         val realignLines = intPreferencesKey("realign_lines")
         val minBreak = longPreferencesKey("min_break_ms")
         val minimalPlayer = booleanPreferencesKey("minimal_player")
+        val oled = booleanPreferencesKey("oled_black")
+        val undoJumpBack = intPreferencesKey("undo_jump_back_sec")
         val confirmOverwrite = booleanPreferencesKey("confirm_overwrite")
         val root = stringPreferencesKey("library_root")
         val ignored = stringPreferencesKey("ignored_folders")
@@ -118,6 +127,8 @@ class SettingsStore(private val context: Context) {
             autoAdvance = p[K.auto] ?: true,
             realignLines = (p[K.realignLines] ?: Realign.DEFAULT_LINES).coerceIn(1, Realign.MAX_LINES),
             minimalPlayer = p[K.minimalPlayer] ?: false,
+            oledBlack = p[K.oled] ?: false,
+            undoJumpBackSec = (p[K.undoJumpBack] ?: Realign.DEFAULT_UNDO_JUMP_SEC).coerceIn(1, Realign.MAX_UNDO_JUMP_SEC),
             minBreakMs = p[K.minBreak] ?: Issues.DEFAULT_MIN_BREAK_MS,
             confirmOverwrite = p[K.confirmOverwrite] ?: true,
             libraryRoot = p[K.root],
@@ -139,7 +150,7 @@ class SettingsStore(private val context: Context) {
     suspend fun save(s: Settings) {
         context.dataStore.edit { p ->
             p[K.tick] = s.tickEnabled; p[K.tickVol] = s.tickVolume; p[K.nudge] = s.nudgeMs
-            p[K.auto] = s.autoAdvance; p[K.realignLines] = s.realignLines; p[K.minBreak] = s.minBreakMs; p[K.minimalPlayer] = s.minimalPlayer; p[K.confirmOverwrite] = s.confirmOverwrite
+            p[K.auto] = s.autoAdvance; p[K.realignLines] = s.realignLines; p[K.minBreak] = s.minBreakMs; p[K.minimalPlayer] = s.minimalPlayer; p[K.undoJumpBack] = s.undoJumpBackSec; p[K.oled] = s.oledBlack; p[K.confirmOverwrite] = s.confirmOverwrite
             p[K.ignored] = s.ignoredFolders.joinToString("\n")
             p[K.ignoredFiles] = s.ignoredFiles.joinToString("\n")
             p[K.showArtistAlbum] = s.showArtistAlbum; p[K.showTags] = s.showTags; p[K.showLyrics] = s.showLyrics

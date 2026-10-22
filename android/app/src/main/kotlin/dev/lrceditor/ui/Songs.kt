@@ -159,10 +159,20 @@ fun SongsScreen(vm: EditorViewModel) {
                                     Text("Remove it from ${members.size} song${if (members.size == 1) "" else "s"}")
                                 }
                             }
+                            if (open && issue == Issue.CONSECUTIVE_EMPTY) Column(Modifier.padding(bottom = 8.dp)) {
+                                Text("A pause needs only one empty line. The extra ones can be removed from the lyrics of the songs below without opening them.",
+                                    color = Studio.Dim, style = MaterialTheme.typography.bodySmall)
+                                OutlinedButton(onClick = { vm.requestFixConsecutiveEmpty(members.map { it.uri }) }) {
+                                    Text("Fix all ${members.size} song${if (members.size == 1) "" else "s"}")
+                                }
+                            }
+                            if (open && issue == Issue.WORK_FIELD) Text(
+                                "Older versions of this app wrote the grouping into the Work field (TIT1). Use \"Edit metadata\" in a song's ⋮ menu and tap \"→ Grouping\" next to the Work field.",
+                                color = Studio.Dim, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 8.dp))
                             HorizontalDivider(color = Studio.Border)
                         }
                         if (open) items(members, key = { "${issue.name}:${it.uri}" }) { s ->
-                            SongRow(s, settings.settings, LyricsFilter.ALL, showIssues = true, onLearn = { vm.requestLearnState(s.uri, s.displayTitle, it) }) { vm.openSong(s.uri) }
+                            SongRow(s, settings.settings, LyricsFilter.ALL, vm, showIssues = true) { vm.openSong(s.uri) }
                         }
                     }
                 }
@@ -206,7 +216,7 @@ private fun LazyListScope.resultItems(results: List<SongEntry>, searched: Boolea
         )
     }
     items(results, key = { it.uri }) { s ->
-        SongRow(s, settings, lyricsFilter, onLearn = { vm.requestLearnState(s.uri, s.displayTitle, it) }) { vm.openSong(s.uri) }
+        SongRow(s, settings, lyricsFilter, vm) { vm.openSong(s.uri) }
     }
 }
 
@@ -294,10 +304,11 @@ internal fun LearnStateItems(current: LearnState, onPick: (LearnState) -> Unit) 
 
 @Composable
 internal fun SongRow(
-    s: SongEntry, cfg: Settings, filter: LyricsFilter, showIssues: Boolean = false,
-    onLearn: (LearnState) -> Unit, onClick: () -> Unit,
+    s: SongEntry, cfg: Settings, filter: LyricsFilter, vm: EditorViewModel, showIssues: Boolean = false, onClick: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
+    val markedBroken by vm.brokenLyrics.collectAsStateWithLifecycle()
+    val broken = s.uri in markedBroken
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
             Text(s.displayTitle, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -323,7 +334,12 @@ internal fun SongRow(
             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Song options", tint = Studio.Dim) }
             DropdownMenu(menu, { menu = false }) {
                 Text("Learning tag", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = Studio.Dim, style = MaterialTheme.typography.labelMedium)
-                LearnStateItems(Search.learnStateOf(s.tags)) { menu = false; onLearn(it) }
+                LearnStateItems(Search.learnStateOf(s.tags)) { menu = false; vm.requestLearnState(s.uri, s.displayTitle, it) }
+                HorizontalDivider(color = Studio.Border)
+                DropdownMenuItem(
+                    text = { Text(if (broken) "Remove broken lyrics mark" else "Mark lyrics as broken") },
+                    onClick = { menu = false; vm.toggleBrokenLyrics(s.uri) },
+                )
             }
         }
     }

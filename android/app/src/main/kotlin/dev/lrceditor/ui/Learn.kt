@@ -92,7 +92,7 @@ fun LearnScreen(vm: EditorViewModel) {
                     color = Studio.Dim, modifier = Modifier.padding(vertical = 16.dp))
             }
             items(shown, key = { it.uri }) { s ->
-                SongRow(s, ui.settings, lyrics, onLearn = { vm.requestLearnState(s.uri, s.displayTitle, it) }) { vm.openSong(s.uri) }
+                SongRow(s, ui.settings, lyrics, vm) { vm.openSong(s.uri) }
             }
         }
     }

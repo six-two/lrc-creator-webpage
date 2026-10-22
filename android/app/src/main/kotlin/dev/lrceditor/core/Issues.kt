@@ -32,6 +32,8 @@ enum class Issue(val label: String, val warning: Boolean = false, val tagIssue: 
     LEADING_EMPTY("empty line at the start", warning = true),
     /** An empty line directly after another one. Review only. */
     CONSECUTIVE_EMPTY("empty lines in a row", warning = true, counted = true),
+    /** The file has a Work (TIT1) frame. Older versions of this app wrote the grouping there; the metadata editor can move it to the grouping (GRP1). Review only. */
+    WORK_FIELD("Work field (TIT1) set", warning = true),
     /**
      * An empty line followed by a lyric line less than the chosen time later (Settings > Editor). Review only. Never in the stored
      * [Issues.countSong] result: the limit can be changed, so it is worked out from the stored gaps (see [Issues.breakGaps]).
@@ -211,18 +213,19 @@ object Issues {
     private const val MIN_RUN = 3
 
     /** Problems with a song (see [countSong]), without how often each occurs. */
-    fun checkSong(tags: List<String>, lyricsText: String?, syltOnly: Boolean = false, durationMs: Long? = null): Set<Issue> =
-        countSong(tags, lyricsText, syltOnly, durationMs).keys.toSet()
+    fun checkSong(tags: List<String>, lyricsText: String?, syltOnly: Boolean = false, durationMs: Long? = null, hasWork: Boolean = false): Set<Issue> =
+        countSong(tags, lyricsText, syltOnly, durationMs, hasWork).keys.toSet()
 
     /**
      * Problems with a song given its grouping [tags] and the text of its USLT frame ([lyricsText], null if none), each with
      * how often it occurs in the file (1 for those that are about the whole song).
      * [syltOnly]: it has a synced (SYLT) frame but no readable USLT, so its lines aren't checked.
-     * [durationMs]: the song's length if known, for [Issue.PAST_END].
+     * [durationMs]: the song's length if known, for [Issue.PAST_END]. [hasWork]: the file has a TIT1 frame, for [Issue.WORK_FIELD].
      * Plain (untagged) lyrics are not flagged as untimed: they are simply unsynced.
      */
-    fun countSong(tags: List<String>, lyricsText: String?, syltOnly: Boolean = false, durationMs: Long? = null): Map<Issue, Int> {
+    fun countSong(tags: List<String>, lyricsText: String?, syltOnly: Boolean = false, durationMs: Long? = null, hasWork: Boolean = false): Map<Issue, Int> {
         val out = linkedMapOf<Issue, Int>()
+        if (hasWork) out[Issue.WORK_FIELD] = 1
         if (tags.map(Search::tagKey).count { k -> LearnState.tags.any { Search.tagKey(it) == k } } > 1) out[Issue.CONFLICTING_LEARN_TAGS] = 1
         if (syltOnly) { out[Issue.SYLT_ONLY] = 1; return out }
         val text = lyricsText?.takeIf { it.isNotBlank() }
